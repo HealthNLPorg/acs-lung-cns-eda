@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from operator import itemgetter
 import datetime
 import logging
+import pathlib
 from dateutil.parser import parse
 
 parser = argparse.ArgumentParser(description="")
@@ -56,36 +57,81 @@ def parse_and_normalize_date(dt_str: str) -> datetime.date:
 
 
 @lru_cache
-def is_before(pt_earliest: str, note_date: str) -> bool:
+def is_before(pt_earliest: str, note_date: str | None) -> bool:
+    if note_date is None:
+        return False
     return parse_and_normalize_date(pt_earliest) <= parse_and_normalize_date(note_date)
 
 
-def mrn_if_note_and_time_compatible(
-    mrn_to_earliest_date: dict[int, str], note_json: dict[str, str | int]
-) -> int | None:
-    mrn = int(note_json["DFCI_MRN"])
-    # note_id = int(note_json["id"])
-    if mrn not in mrn_to_earliest_date.keys():
-        return None
-    pt_earliest = mrn_to_earliest_date.get(mrn)
-    if pt_earliest is None:
-        raise ValueError(
-            f"{mrn} is not associated with a date despite nulls having been dropped earlier"
+def mkdir(dir_name: str) -> None:
+    _dir_name = pathlib.Path(dir_name)
+    _dir_name.mkdir(parents=True, exist_ok=True)
+
+
+def write_unique_keys(
+    output_dir: str, category: str, note_json_list: list[dict[str, str | int]]
+) -> None:
+    with open(os.path.join(output_dir, f"{category}_unique_keys.txt"), mode="w") as f:
+        for key in sorted(
+            set(chain.from_iterable(note_json.keys() for note_json in note_json_list))
+        ):
+            f.write(f"{key}\n")
+
+
+def write_field_totals(
+    output_dir: str, fields: list[str], note_json_list: list[dict[str, str | int]]
+) -> None:
+    def normalize(field: str) -> str:
+        return " ".join(field.split("_")).title()
+
+    field_to_value_totals = {field: Counter() for field in fields}
+    for note_json in note_json_list:
+        for field, counter in field_to_value_totals.items():
+            field_value = note_json.get(field)
+            counter[
+                normalize(field_value)
+                if isinstance(field_value, str)
+                else str(field_value)
+            ] += 1
+    for field, counter in field_to_value_totals.items():
+        pl.DataFrame(
+            sorted(counter.items(), key=itemgetter(1), reverse=True),
+            schema=[normalize(field), "Total"],
+            orient="row",
+        ).write_csv(
+            os.path.join(output_dir, f"{field.lower()}_totals.tsv"), separator="\t"
         )
-        return None
+
+
+def write_totals(output_dir: str, fields: list[str], notes_dir: str) -> None:
+    core_dirname = "_".join(os.path.basename(notes_dir).split()).lower()
+    target_dir = os.path.join(output_dir, f"{core_dirname}_metrics")
+    mkdir(target_dir)
+
+    def get_notes_ls(fn: str) -> list[dict[str, str | int]]:
+        with open(os.path.join(notes_dir, fn)) as f:
+            return json.load(f)["response"]["docs"]
+
+    all_notes_json_ls = list(
+        chain.from_iterable(
+            get_notes_ls(fn) for fn in os.listdir(notes_dir) if fn.endswith("json")
+        )
+    )
+    write_unique_keys(
+        target_dir,
+        core_dirname,
+        all_notes_json_ls,
+    )
+    write_field_totals(target_dir, fields, all_notes_json_ls)
+
+
+def note_is_qualified(
+    mrn_to_earliest_date: dict[int, str], note_json: dict[str, str | int]
+) -> bool:
+    mrn = int(note_json["DFCI_MRN"])
+    pt_earliest = mrn_to_earliest_date.get(mrn)
     note_date = note_json.get("EVENT_DATE")
-    if note_date is None:
-        raise ValueError(f"{note_json} missing an event date")
-        return None
-    if is_before(pt_earliest, note_date):
-        # logger.info(
-        #     f"QUALIFIES - MRN {mrn} with earliest occurrence {pt_earliest} with note {note_id} with date {note_date}"
-        # )
-        return mrn
-    # logger.info(
-    #     f"NOT QUALIFIED - MRN {mrn} with earliest occurrence {pt_earliest} with note {note_id} with date {note_date}"
-    # )
-    return None  # for type checking
+    return is_before(pt_earliest, note_date)
 
 
 # [
@@ -160,19 +206,21 @@ def mrn_if_note_and_time_compatible(
 # CSV rows for reference - just in imaging?
 
 
-def get_file_totals_csv(
+def get_qualified_notes_from_csv(
     mrn_to_earliest_date: dict[int, str], csv_path: str
-) -> Counter[int]:
-    raise NotImplementedError("Maybe we need to do this maybe we don't")
+) -> list[dict[str, str | int]]:
+    local_qualified = partial(note_is_qualified, mrn_to_earliest_date)
+    note_json_list = pl.read_csv(csv_path).to_dicts()
+    return [note_json for note_json in note_json_list if local_qualified(note_json)]
 
 
-def get_file_totals_json(
+def get_qualified_notes_from_json(
     mrn_to_earliest_date: dict[int, str], json_path: str
-) -> Counter[int]:
+) -> list[dict[str, str | int]]:
     with open(json_path) as f:
         note_json_list = json.load(f)["response"]["docs"]
-    local_mrn = partial(mrn_if_note_and_time_compatible, mrn_to_earliest_date)
-    return Counter(filter(None, map(local_mrn, note_json_list)))
+    local_qualified = partial(note_is_qualified, mrn_to_earliest_date)
+    return [note_json for note_json in note_json_list if local_qualified(note_json)]
 
 
 def get_dir_totals(
@@ -227,6 +275,7 @@ def collect_notes_and_write_metrics(
             mrn_and_date_df["mrn"], mrn_and_date_df["earliest_date"]
         )
     }
+
     final_sorted_df = pl.DataFrame(
         get_totals(mrn_to_earliest_date, notes_dir),
         schema=["MRN", "TOTAL_AFTER_EARLIEST"],
