@@ -178,7 +178,7 @@ def inpatient_and_progress_provider_filter(
         if __has_relevant_provider_type(note_json)
     ]
     logger.info(
-        f"Total inpatient+progress notes before provider type filtration: {len(note_json_list)} - after: {len(result)}"
+        f"Total Inpatient+Progress notes before provider type filtration: {len(note_json_list)} - after: {len(result)}"
     )
     return result
 
@@ -198,6 +198,10 @@ def has_valid_mrn_and_date(
     return is_before(pt_earliest, note_date)
 
 
+def raw_csv_parse(csv_path: str) -> list[dict[str, str | int]]:
+    return pl.read_csv(csv_path).to_dicts()
+
+
 def get_valid_mrn_and_date_notes_from_csv(
     mrn_to_earliest_date: dict[int, str],
     csv_path: str,
@@ -206,13 +210,21 @@ def get_valid_mrn_and_date_notes_from_csv(
     local_valid_mrn_and_date = partial(has_valid_mrn_and_date, mrn_to_earliest_date)
     note_json_list = pl.read_csv(csv_path).to_dicts()
 
-    results = [
+    result = [
         note_json for note_json in note_json_list if local_valid_mrn_and_date(note_json)
     ]
+    logger.info(
+        f"Total {debug_source}  notes before MRN and date filtration: {len(note_json_list)} - after: {len(result)}"
+    )
     if debug_source is not None:
-        for node_json in results:
+        for node_json in result:
             node_json["debug_source"] = debug_source
-    return results
+    return result
+
+
+def raw_json_parse(json_path: str) -> list[dict[str, str | int]]:
+    with open(json_path) as f:
+        return json.load(f)["response"]["docs"]
 
 
 def get_valid_mrn_and_date_notes_from_json(
@@ -223,13 +235,16 @@ def get_valid_mrn_and_date_notes_from_json(
     with open(json_path) as f:
         note_json_list = json.load(f)["response"]["docs"]
     local_valid_mrn_and_date = partial(has_valid_mrn_and_date, mrn_to_earliest_date)
-    results = [
+    result = [
         note_json for note_json in note_json_list if local_valid_mrn_and_date(note_json)
     ]
+    logger.info(
+        f"Total {debug_source}  notes before MRN and date filtration: {len(note_json_list)} - after: {len(result)}"
+    )
     if debug_source is not None:
-        for node_json in results:
+        for node_json in result:
             node_json["debug_source"] = debug_source
-    return results
+    return result
 
 
 def get_dir_to_valid_mrn_and_date_notes(
@@ -246,21 +261,29 @@ def get_dir_to_valid_mrn_and_date_notes(
     ) -> Iterable[dict[str, str | int]]:
         for fn in files:
             if fn.lower().endswith("json"):
-                yield from get_valid_mrn_and_date_notes_from_json(
-                    mrn_to_earliest_date, os.path.join(root, fn), os.path.basename(root)
-                )
+                yield from raw_json_parse(os.path.join(root, fn))
             elif fn.lower().endswith("csv"):
-                yield from get_valid_mrn_and_date_notes_from_csv(
-                    mrn_to_earliest_date, os.path.join(root, fn), os.path.basename(root)
-                )
+                yield from raw_csv_parse(os.path.join(root, fn))
             else:
                 ValueError(f"{os.path.join(root, fn)} has bad extension")
 
-    return {
+    initial = {
         os.path.basename(root): list(get_valid_mrn_and_date_notes(root, files))
         for root, dirs, files in os.walk(notes_dir)
         if is_relevant(os.path.basename(root))
     }
+
+    local_valid_mrn_and_date = partial(has_valid_mrn_and_date, mrn_to_earliest_date)
+    final = {}
+    for dirname, all_notes in initial.items():
+        filtered = [
+            note_json for note_json in all_notes if local_valid_mrn_and_date(note_json)
+        ]
+        logger.info(
+            f"Total {dirname}  notes before MRN and date filtration: {len(all_notes)} - after: {len(filtered)}"
+        )
+        final[dirname] = filtered
+    return final
 
 
 # NB: depending on the predicates used, there may be notes/folders left out,
@@ -331,6 +354,10 @@ def collect_notes_and_write_metrics(
     synthetic_category_to_notes = merge_by_named_predicates(
         dir_to_valid_mrn_and_date_notes, name_to_predicate
     )
+    synthetic_category_to_title = {
+        "lmr": "LMR",
+        "inpatient_and_progress": "Inpatient+Progress",
+    }
     for synthetic_category, notes in synthetic_category_to_notes.items():
         initial_filter = name_to_initial_filter.get(synthetic_category)
         if initial_filter is None:
@@ -344,7 +371,7 @@ def collect_notes_and_write_metrics(
         )
         word_count_filtered = word_count_filter(initial_filtered)
         logger.info(
-            f"{synthetic_category} total after word count filtration - {len(word_count_filtered)}"
+            f"{synthetic_category_to_title[synthetic_category]} total after word count filtration - {len(word_count_filtered)}"
         )
         save_jsonl(
             os.path.join(output_dir, "after_word_count_filter"),
