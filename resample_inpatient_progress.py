@@ -56,7 +56,8 @@ def __get_provider_dept_total(line: str) -> int:
 
 
 def __get_provider_dept_name(line: str) -> str | None:
-    target_column_regex = r"\"([A-Z\s0-9]+)\""
+    # target_column_regex = r"\"([A-Z\s0-9\/]+)\""
+    target_column_regex = r"\"([^\"\']+)\""
     matches = re.findall(target_column_regex, line)
     match len(matches):
         case 1:
@@ -97,31 +98,36 @@ def __select_from_note_pool(
     _to_subsample, _to_completely_retain = partition(
         __under_threshold, type_to_total.items()
     )
-    types_to_subsample = set(map(itemgetter(0), _to_subsample))
-    logger.info(f"To subsample:\n{types_to_subsample}")
-    types_to_completely_retain = set(map(itemgetter(0), _to_completely_retain))
-    logger.info(f"To retain:\n{types_to_completely_retain}")
+    subsample_dict = dict(_to_subsample)
+    completely_retain_dict = dict(_to_completely_retain)
+    logger.info("To retain:")
+    for dept, total in sorted(
+        completely_retain_dict.items(), key=itemgetter(1), reverse=True
+    ):
+        print(f"{dept}\t{total}")
+    logger.info("To subsample:")
+    for dept, total in sorted(subsample_dict.items(), key=itemgetter(1), reverse=True):
+        print(f"{dept}\t{total}")
     fully_retained = [
         note_json
         for note_json in note_json_list
         if note_json.get(type_key) is not None
-        and note_json.get(type_key) in types_to_completely_retain
+        and note_json.get(type_key) in completely_retain_dict
     ]
     logger.info(f"Total retained notes: {len(fully_retained)}")
     to_subsample = [
         note_json
         for note_json in note_json_list
         if note_json.get(type_key) is not None
-        and note_json.get(type_key) in types_to_subsample
+        and note_json.get(type_key) in subsample_dict
     ]
-    logger.info(f"Total retained notes: {len(to_subsample)}")
+    logger.info(f"Total notes to subsample: {len(to_subsample)}")
     difference = target_total - sum(
         total
         for _type, total in type_to_total.items()
-        if _type in types_to_completely_retain
+        if _type in completely_retain_dict
     )
     logger.info(f"Target difference: {difference}")
-    exit(1)
     raw_list = list(chain(fully_retained, random.sample(to_subsample, difference)))
     ad_hoc_totals = Counter(map(itemgetter(type_key), raw_list))
 
@@ -146,7 +152,7 @@ def resample_notes(
     )
     save_jsonl(
         output_dir,
-        f"{type_key.lower()}_below_{type_total_threshold}_first.jsonl",
+        f"{type_key.lower()}_below_{type_total_threshold}_first",
         sorted_notes,
     )
 
