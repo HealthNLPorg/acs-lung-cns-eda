@@ -422,7 +422,7 @@ def collect_notes_and_write_metrics(
     for synthetic_category, notes in synthetic_category_to_notes.items():
         initial_filter = name_to_initial_filter.get(synthetic_category)
         if initial_filter is None:
-            logger.info(f"Skipping {synthetic_category}")
+            logger.info("Skipping %s", synthetic_category)
             continue
         initial_filtered = initial_filter(notes)
         save_jsonl(
