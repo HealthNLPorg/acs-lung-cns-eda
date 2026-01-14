@@ -383,16 +383,35 @@ def merge_by_named_predicates(
 def build_case_number_to_raw_mrn_map(
     casenum_mrn_table: str,
 ) -> Mapping[int, int]:
+    casenum_mrn_frame = pl.read_excel(casenum_mrn_table)
     return {}
 
 
 def get_inter_site_mrn_tuples(inter_site_mrn_table: str) -> set[InterSiteMRNTuple]:
-    return set()
+    def row_dict_to_named_tuple(
+        row_dict: Mapping[str, int | None],
+    ) -> InterSiteMRNTuple:
+        return InterSiteMRNTuple(
+            row_dict.get("DFCI_MRN"),
+            row_dict.get("EMPI"),
+            row_dict.get("MGH_MRN"),
+        )
+
+    inter_site_mrn_frame = (
+        pl.read_csv(inter_site_mrn_table)
+        .select("DFCI_MRN", "EMPI", "MGH_MRN")
+        .filter(~pl.all_horizontal(pl.all().is_null()))
+    )
+    return {
+        row_dict_to_named_tuple(row_dict)
+        for row_dict in inter_site_mrn_frame.to_dicts()
+    }
 
 
 def build_case_number_to_event_date_map(
     casenum_ade_date_table: str,
 ) -> Mapping[int, datetime.date]:
+    casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table)
     return {}
 
 
