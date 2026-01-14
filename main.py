@@ -1,5 +1,5 @@
 import polars as pl
-from collections import namedtuple, defaultdict
+from collections import namedtuple
 import os
 import json
 import argparse
@@ -414,18 +414,36 @@ def get_inter_site_mrn_tuples(inter_site_mrn_table: str) -> set[InterSiteMRNTupl
     }
 
 
+def clean_possible_dates(possible_dates: Iterable[str | None]) -> list[str]:
+    def clean_date(possible_date: str) -> str:
+        year, month, day = possible_date.split("/")
+        if year.isnumeric() and month.isnumeric():
+            if day.isnumeric():
+                return possible_date
+            elif day == "UNK":
+                return f"{year}/{month}/{1}"
+        else:
+            raise ValueError(f"Incorrectly formatted date - {possible_date}")
+        return "ERROR"
+
+    return list(map(clean_date, filter(None, possible_dates)))
+
+
 def build_case_number_to_event_dates_map(
     casenum_ade_date_table: str,
     # not parsing to datetime.date yet, that's downstream
-) -> Mapping[int, list[str]]:
-    case_number_to_event_dates = defaultdict(list)
+) -> Mapping[int, str]:
+    case_number_to_event_dates = {}
     casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table).select(
-        "casenum", "DTS_DTTOXSTART1"
+        "casenum", "TOXDESC", "DTS_DTTOXSTART1"
     )
-    for k, _ in casenum_ade_date_frame.group_by("casenum", "DTS_DTTOXSTART1"):
-        casenum, initial_date = k
-        if initial_date is not None:
-            case_number_to_event_dates[int(casenum)] = initial_date
+    for (casenum, _), sub_frame in casenum_ade_date_frame.group_by(
+        "casenum",
+        "TOXDESC",
+    ):
+        possible_dates = clean_possible_dates(sub_frame["DTS_DTTOXSTART1"])
+        if len(possible_dates) > 0:
+            case_number_to_event_dates[int(casenum)] = random.choice(possible_dates)
     return case_number_to_event_dates
 
 
