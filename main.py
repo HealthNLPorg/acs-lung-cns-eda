@@ -383,8 +383,14 @@ def merge_by_named_predicates(
 def build_case_number_to_raw_mrn_map(
     casenum_mrn_table: str,
 ) -> Mapping[int, int]:
-    casenum_mrn_frame = pl.read_excel(casenum_mrn_table)
-    return {}
+    casenum_mrn_frame = pl.read_excel(casenum_mrn_table).select("casenum", "MRN")
+    return {
+        casenum: mrn
+        for casenum, mrn in zip(
+            casenum_mrn_frame["casenum"].cast(pl.Int64),
+            casenum_mrn_frame["MRN"].cast(pl.Int64),
+        )
+    }
 
 
 def get_inter_site_mrn_tuples(inter_site_mrn_table: str) -> set[InterSiteMRNTuple]:
