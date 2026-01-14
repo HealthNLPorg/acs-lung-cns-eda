@@ -1,5 +1,6 @@
 import polars as pl
 from collections import namedtuple
+from operator import itemgetter
 import os
 import json
 import argparse
@@ -452,6 +453,27 @@ def build_mrn_to_raw_event_date_map(
     inter_site_mrn_table: str,
     casenum_mrn_table: str,
 ) -> Mapping[int, str]:
+    mrn_tuples = get_inter_site_mrn_tuples(inter_site_mrn_table)
+    dfci_mrns = set(map(itemgetter("DFCI"), mrn_tuples))
+    empi_mrns = set(map(itemgetter("EMPI"), mrn_tuples))
+    mgh_mrns = set(map(itemgetter("MGH"), mrn_tuples))
+    case_number_to_raw_mrn_map = build_case_number_to_raw_mrn_map(
+        casenum_ade_date_table
+    )
+    unique_mrns = set(case_number_to_raw_mrn_map.values())
+    missing_in_dfci = len(unique_mrns - dfci_mrns)
+    missing_in_empi = len(unique_mrns - empi_mrns)
+    missing_in_mgh = len(unique_mrns - mgh_mrns)
+    missing_of_each = (missing_in_dfci, missing_in_empi, missing_in_mgh)
+    match missing_of_each:
+        case (missing_of_each,) if all(map(lambda total: total != 0, missing_of_each)):
+            raise ValueError(
+                f"DFCI, EMPI, and MGH all have the following missing respectively {missing_of_each}"
+            )
+        case (missing_of_each,) if all(map(lambda total: total == 0, missing_of_each)):
+            raise ValueError(
+                f"DFCI, EMPI, and MGH are all covered, this shouldn't happen {missing_of_each}"
+            )
     return {}
 
 
@@ -465,25 +487,11 @@ def collect_notes_and_write_metrics(
     fields: list[str],
     subsample_total: int = 250,
 ) -> None:
-    # pt_record_df = pl.read_csv(pt_record_csv)
-    # mrn_and_date_df = (
-    #     pt_record_df.with_columns(pl.col("mrn").cast(pl.Int64).alias("mrn"))
-    #     .select("mrn", "earliest_date")
-    #     .drop_nulls()
-    # )
-    # assert all(mrn_and_date_df.is_unique()), (
-    #     f"Not unique in {mrn_and_date_df} {mrn_and_date_df.is_unique()}"
-    # )
-    mrn_to_earliest_date = build_mrn_to_raw_event_date_map(
+    mrn_to_selected_date = build_mrn_to_raw_event_date_map(
         casenum_ade_date_table,
         inter_site_mrn_table,
         casenum_mrn_table,
-    )  # {
-    #     mrn: earliest_date
-    #     for mrn, earliest_date in zip(
-    #         mrn_and_date_df["mrn"], mrn_and_date_df["earliest_date"]
-    #     )
-    # }
+    )
 
     def is_one_of(core_names: Iterable[str]) -> Callable[[str], bool]:
         def __is_one_of(dirname: str) -> bool:
@@ -501,7 +509,7 @@ def collect_notes_and_write_metrics(
         "inpatient_and_progress": is_one_of(("inpatient", "progress")),
     }
     dir_to_valid_mrn_and_date_notes = get_dir_to_valid_mrn_and_date_notes(
-        mrn_to_earliest_date, notes_dir, {"lmr", "inpatient", "progress"}
+        mrn_to_selected_date, notes_dir, {"lmr", "inpatient", "progress"}
     )
 
     name_to_initial_filter = {
