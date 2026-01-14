@@ -1,5 +1,5 @@
 import polars as pl
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 import os
 import json
 import argparse
@@ -414,11 +414,19 @@ def get_inter_site_mrn_tuples(inter_site_mrn_table: str) -> set[InterSiteMRNTupl
     }
 
 
-def build_case_number_to_event_date_map(
+def build_case_number_to_event_dates_map(
     casenum_ade_date_table: str,
-) -> Mapping[int, datetime.date]:
-    casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table)
-    return {}
+    # not parsing to datetime.date yet, that's downstream
+) -> Mapping[int, list[str]]:
+    case_number_to_event_dates = defaultdict(list)
+    casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table).select(
+        "casenum", "DTS_DTTOXSTART1"
+    )
+    for k, _ in casenum_ade_date_frame.group_by("casenum", "DTS_DTTOXSTART1"):
+        casenum, initial_date = k
+        if initial_date is not None:
+            case_number_to_event_dates[int(casenum)] = initial_date
+    return case_number_to_event_dates
 
 
 def build_mrn_to_raw_event_date_map(
