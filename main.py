@@ -1,12 +1,13 @@
 import polars as pl
+from collections import namedtuple
 import os
-import json  # if proves to be too slow or memory consuming look into https://github.com/ICRAR/ijson + https://github.com/lloyd/yajl
+import json
 import argparse
 import random
 from functools import partial, lru_cache
 from itertools import chain
-from collections.abc import Iterable
-from typing import Callable, cast
+from collections.abc import Iterable, Mapping, Callable
+from typing import cast
 import datetime
 import logging
 import pathlib
@@ -15,9 +16,21 @@ from dateutil.parser import parse
 parser = argparse.ArgumentParser(description="")
 
 parser.add_argument(
-    "--pt_record_csv",
+    "--casenum_ade_date_table",
     type=str,
-    help="CSV containing patient MRNs and earliest dates",
+    help="Excel spreadsheet (xlsx) containing case numbers, descriptions of toxicity events, and earliest dates",
+)
+
+parser.add_argument(
+    "--inter_site_mrn_table",
+    type=str,
+    help="CSV containing patient names coordinated with corresponding MRNs (if any) from MGB, EMPI, and MGH",
+)
+
+parser.add_argument(
+    "--casenum_mrn_table",
+    type=str,
+    help="Excel spreadsheet (xlsx) containing case numbers coordinated with names and MRNs from some site.  Which site?  Let's find out!",
 )
 
 parser.add_argument(
@@ -48,6 +61,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 note_dict = dict[str, str | int]
+
+InterSiteMRNTuple = namedtuple("InterSiteMRNTuple", ["DFCI", "EMPI", "MGH"])
 
 
 def __normalize(s: str) -> str:
@@ -302,7 +317,7 @@ def identify_keys_with_unique_values(
 
 
 def get_dir_to_valid_mrn_and_date_notes(
-    mrn_to_earliest_date: dict[int, str], notes_dir: str, relevant_dirs: set[str]
+    mrn_to_earliest_date: Mapping[int, str], notes_dir: str, relevant_dirs: set[str]
 ) -> dict[str, list[note_dict]]:
     def is_relevant(dirname) -> bool:
         for relevant_dir in relevant_dirs:
@@ -365,28 +380,59 @@ def merge_by_named_predicates(
     }
 
 
+def build_case_number_to_raw_mrn_map(
+    casenum_mrn_table: str,
+) -> Mapping[int, int]:
+    return {}
+
+
+def get_inter_site_mrn_tuples(inter_site_mrn_table: str) -> set[InterSiteMRNTuple]:
+    return set()
+
+
+def build_case_number_to_event_date_map(
+    casenum_ade_date_table: str,
+) -> Mapping[int, datetime.date]:
+    return {}
+
+
+def build_mrn_to_raw_event_date_map(
+    casenum_ade_date_table: str,
+    inter_site_mrn_table: str,
+    casenum_mrn_table: str,
+) -> Mapping[int, str]:
+    return {}
+
+
 def collect_notes_and_write_metrics(
-    pt_record_csv: str,
+    # pt_record_csv: str,
+    casenum_ade_date_table: str,
+    inter_site_mrn_table: str,
+    casenum_mrn_table: str,
     notes_dir: str,
     output_dir: str,
     fields: list[str],
     subsample_total: int = 250,
 ) -> None:
-    pt_record_df = pl.read_csv(pt_record_csv)
-    mrn_and_date_df = (
-        pt_record_df.with_columns(pl.col("mrn").cast(pl.Int64).alias("mrn"))
-        .select("mrn", "earliest_date")
-        .drop_nulls()
-    )
-    assert all(mrn_and_date_df.is_unique()), (
-        f"Not unique in {mrn_and_date_df} {mrn_and_date_df.is_unique()}"
-    )
-    mrn_to_earliest_date = {
-        mrn: earliest_date
-        for mrn, earliest_date in zip(
-            mrn_and_date_df["mrn"], mrn_and_date_df["earliest_date"]
-        )
-    }
+    # pt_record_df = pl.read_csv(pt_record_csv)
+    # mrn_and_date_df = (
+    #     pt_record_df.with_columns(pl.col("mrn").cast(pl.Int64).alias("mrn"))
+    #     .select("mrn", "earliest_date")
+    #     .drop_nulls()
+    # )
+    # assert all(mrn_and_date_df.is_unique()), (
+    #     f"Not unique in {mrn_and_date_df} {mrn_and_date_df.is_unique()}"
+    # )
+    mrn_to_earliest_date = build_mrn_to_raw_event_date_map(
+        casenum_ade_date_table,
+        inter_site_mrn_table,
+        casenum_mrn_table,
+    )  # {
+    #     mrn: earliest_date
+    #     for mrn, earliest_date in zip(
+    #         mrn_and_date_df["mrn"], mrn_and_date_df["earliest_date"]
+    #     )
+    # }
 
     def is_one_of(core_names: Iterable[str]) -> Callable[[str], bool]:
         def __is_one_of(dirname: str) -> bool:
@@ -449,7 +495,13 @@ def collect_notes_and_write_metrics(
 def main():
     args = parser.parse_args()
     collect_notes_and_write_metrics(
-        args.pt_record_csv, args.notes_dir, args.output_dir, args.fields
+        # args.pt_record_csv,
+        args.casenum_ade_date_table,
+        args.inter_site_mrn_table,
+        args.casenum_mrn_table,
+        args.notes_dir,
+        args.output_dir,
+        args.fields,
     )
 
 
