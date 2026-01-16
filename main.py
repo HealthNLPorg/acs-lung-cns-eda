@@ -5,6 +5,7 @@ import os
 import json
 import argparse
 import random
+from enum import Enum
 from functools import partial, lru_cache
 from itertools import chain
 from collections.abc import Iterable, Mapping, Callable
@@ -63,7 +64,14 @@ logging.basicConfig(
 )
 note_dict = dict[str, str | int]
 
-InterSiteMRNTuple = namedtuple("InterSiteMRNTuple", ["DFCI", "EMPI", "MGH"])
+
+class MRNSpace(Enum):
+    DFCI = "DFCI"
+    EMPI = "EMPI"
+    MGH = "MGH"
+
+
+InterSiteMRNTuple = namedtuple("InterSiteMRNTuple", [space.value for space in MRNSpace])
 
 
 def __normalize(s: str) -> str:
@@ -422,7 +430,7 @@ def clean_possible_dates(possible_dates: Iterable[str | None]) -> list[str]:
             if day.isnumeric():
                 return possible_date
             elif day == "UNK":
-                return f"{year}/{month}/{1}"
+                return f"{year}/{month}/1"
         else:
             raise ValueError(f"Incorrectly formatted date - {possible_date}")
         return "ERROR"
@@ -430,7 +438,7 @@ def clean_possible_dates(possible_dates: Iterable[str | None]) -> list[str]:
     return list(map(clean_date, filter(None, possible_dates)))
 
 
-def build_case_number_to_event_dates_map(
+def build_case_number_to_event_date_map(
     casenum_ade_date_table: str,
     # not parsing to datetime.date yet, that's downstream
 ) -> Mapping[int, str]:
@@ -452,11 +460,11 @@ def build_mrn_to_raw_event_date_map(
     casenum_ade_date_table: str,
     inter_site_mrn_table: str,
     casenum_mrn_table: str,
-) -> Mapping[int, str]:
+) -> tuple[Mapping[int, str], Enum]:
     mrn_tuples = get_inter_site_mrn_tuples(inter_site_mrn_table)
-    dfci_mrns = set(map(itemgetter("DFCI"), mrn_tuples))
-    empi_mrns = set(map(itemgetter("EMPI"), mrn_tuples))
-    mgh_mrns = set(map(itemgetter("MGH"), mrn_tuples))
+    dfci_mrns = set(map(itemgetter(MRNSpace.DFCI.value), mrn_tuples))
+    empi_mrns = set(map(itemgetter(MRNSpace.EMPI.value), mrn_tuples))
+    mgh_mrns = set(map(itemgetter(MRNSpace.MGH.value), mrn_tuples))
     case_number_to_raw_mrn_map = build_case_number_to_raw_mrn_map(
         casenum_ade_date_table
     )
@@ -464,17 +472,38 @@ def build_mrn_to_raw_event_date_map(
     missing_in_dfci = len(unique_mrns - dfci_mrns)
     missing_in_empi = len(unique_mrns - empi_mrns)
     missing_in_mgh = len(unique_mrns - mgh_mrns)
-    missing_of_each = (missing_in_dfci, missing_in_empi, missing_in_mgh)
-    match missing_of_each:
-        case (missing_of_each,) if all(map(lambda total: total != 0, missing_of_each)):
+    space_to_missing = {
+        MRNSpace.DFCI.value: missing_in_dfci,
+        MRNSpace.EMPI.value: missing_in_empi,
+        MRNSpace.MGH.value: missing_in_mgh,
+    }
+    covered_spaces = {
+        space: missing for space, missing in space_to_missing.items() if missing == 0
+    }
+    target_space = None
+    match len(covered_spaces):
+        case 1:
+            target_space = MRNSpace(next(iter(covered_spaces.keys())))
+            logger.info("Using %s for MRNs", target_space)
+        case 0:
             raise ValueError(
-                f"DFCI, EMPI, and MGH all have the following missing respectively {missing_of_each}"
+                f"None of {', '.join(sorted(covered_spaces.keys()))} are covered"
             )
-        case (missing_of_each,) if all(map(lambda total: total == 0, missing_of_each)):
+        case _:
             raise ValueError(
-                f"DFCI, EMPI, and MGH are all covered, this shouldn't happen {missing_of_each}"
+                f"More than one of {', '.join(sorted(covered_spaces.keys()))} are covered"
             )
-    return {}
+    case_number_to_event_date_map = build_case_number_to_event_date_map(
+        casenum_ade_date_table
+    )
+    mrn_to_event_dates_map = {}
+    for case_number, event_date in case_number_to_event_date_map.items():
+        # case number not included if not enough MRNs
+        # so not worrying about those
+        mrn = case_number_to_raw_mrn_map.get(case_number)
+        if mrn is not None:
+            mrn_to_event_dates_map[mrn] = event_date
+    return mrn_to_event_dates_map, target_space
 
 
 def collect_notes_and_write_metrics(
@@ -487,7 +516,7 @@ def collect_notes_and_write_metrics(
     fields: list[str],
     subsample_total: int = 250,
 ) -> None:
-    mrn_to_selected_date = build_mrn_to_raw_event_date_map(
+    mrn_to_selected_date, target_space = build_mrn_to_raw_event_date_map(
         casenum_ade_date_table,
         inter_site_mrn_table,
         casenum_mrn_table,
