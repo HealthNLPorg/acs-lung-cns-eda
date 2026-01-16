@@ -1,6 +1,5 @@
 import polars as pl
 from collections import namedtuple
-from operator import itemgetter
 import os
 import json
 import argparse
@@ -8,7 +7,7 @@ import random
 from enum import Enum
 from functools import partial, lru_cache
 from itertools import chain
-from collections.abc import Iterable, Mapping, Callable
+from collections.abc import Iterable, Mapping, Sequence
 from typing import cast
 import datetime
 import logging
@@ -44,11 +43,16 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    "--notes_dir",
+    "--inpatient_json_path",
     type=str,
-    help="Directory containing nested directories of notes contained in JSON files",
+    help="In patient JSON",
 )
 
+parser.add_argument(
+    "--outpatient_json_path",
+    type=str,
+    help="Out patient JSON",
+)
 parser.add_argument(
     "--output_dir",
     type=str,
@@ -212,9 +216,16 @@ def inpatient_and_progress_provider_filter(
 
 
 def has_valid_mrn_and_date(
-    mrn_to_earliest_date: dict[int, str], note_json: note_dict
+    mrn_to_earliest_date: dict[int, str], target_mrn_space: Enum, note_json: note_dict
 ) -> bool:
-    mrn = int(note_json["DFCI_MRN"])
+    match target_mrn_space:
+        case MRNSpace.DFCI:
+            mrn_key = "DFCI_MRN"
+        case _:
+            raise NotImplementedError(
+                "Turns out it wasn't DFCI. Need to find the right MRN key"
+            )
+    mrn = int(note_json[mrn_key])
     if mrn not in mrn_to_earliest_date:
         # invalid MRN
         return False
@@ -326,67 +337,21 @@ def identify_keys_with_unique_values(
 
 
 def get_dir_to_valid_mrn_and_date_notes(
-    mrn_to_earliest_date: Mapping[int, str], notes_dir: str, relevant_dirs: set[str]
-) -> dict[str, list[note_dict]]:
-    def is_relevant(dirname) -> bool:
-        for relevant_dir in relevant_dirs:
-            if dirname.lower().startswith(relevant_dir):
-                return True
-        return False
-
-    def get_valid_mrn_and_date_notes(
-        root: str, files: list[str]
-    ) -> Iterable[note_dict]:
-        for fn in files:
-            if fn.lower().endswith("json"):
-                yield from raw_json_parse(os.path.join(root, fn))
-            elif fn.lower().endswith("csv"):
-                yield from raw_csv_parse(os.path.join(root, fn))
-            else:
-                raise ValueError(f"{os.path.join(root, fn)} has bad extension")
-
-    unique_id_debug_dict = {
-        os.path.basename(root): list(get_valid_mrn_and_date_notes(root, files))
-        for root, dirs, files in os.walk(notes_dir)
-        # if is_relevant(os.path.basename(root))
-    }
-    identify_keys_with_unique_values(unique_id_debug_dict)
-    initial = {
-        dirname: note_dicts
-        for dirname, note_dicts in unique_id_debug_dict.items()
-        if is_relevant(dirname)
-    }
-
-    local_valid_mrn_and_date = partial(has_valid_mrn_and_date, mrn_to_earliest_date)
-    final = {}
-    for dirname, all_notes in initial.items():
-        filtered = [
-            note_json for note_json in all_notes if local_valid_mrn_and_date(note_json)
-        ]
-        logger.info(
-            f"Total {dirname}  notes before MRN and date filtration: {len(all_notes)} - after: {len(filtered)}"
-        )
-        final[dirname] = filtered
-    return final
-
-
-# NB: depending on the predicates used, there may be notes/folders left out,
-# this is intentional for adjusting later
-def merge_by_named_predicates(
-    dir_to_valid_mrn_and_date_notes: dict[str, list[note_dict]],
-    name_to_predicate: dict[str, Callable[[str], bool]],
-) -> dict[str, list[note_dict]]:
-    def re_grouped_notes(
-        predicate: Callable[[str], bool],
-    ) -> Iterable[note_dict]:
-        for dirname, notes in dir_to_valid_mrn_and_date_notes.items():
-            if predicate(dirname):
-                yield from notes
-
-    return {
-        predicate_name: list(re_grouped_notes(predicate))
-        for predicate_name, predicate in name_to_predicate.items()
-    }
+    mrn_to_earliest_date: Mapping[int, str],
+    target_mrn_space: Enum,
+    json_path: str,
+) -> Sequence[note_dict]:
+    all_notes = raw_json_parse(json_path)
+    local_valid_mrn_and_date = partial(
+        has_valid_mrn_and_date, mrn_to_earliest_date, target_mrn_space
+    )
+    filtered = [
+        note_json for note_json in all_notes if local_valid_mrn_and_date(note_json)
+    ]
+    logger.info(
+        f"Total {json_path} notes before MRN and date filtration: {len(all_notes)} - after: {len(filtered)}"
+    )
+    return filtered
 
 
 def build_case_number_to_raw_mrn_map(
@@ -462,12 +427,10 @@ def build_mrn_to_raw_event_date_map(
     casenum_mrn_table: str,
 ) -> tuple[Mapping[int, str], Enum]:
     mrn_tuples = get_inter_site_mrn_tuples(inter_site_mrn_table)
-    dfci_mrns = set(map(itemgetter(MRNSpace.DFCI.value), mrn_tuples))
-    empi_mrns = set(map(itemgetter(MRNSpace.EMPI.value), mrn_tuples))
-    mgh_mrns = set(map(itemgetter(MRNSpace.MGH.value), mrn_tuples))
-    case_number_to_raw_mrn_map = build_case_number_to_raw_mrn_map(
-        casenum_ade_date_table
-    )
+    dfci_mrns = {mrn_tuple.DFCI for mrn_tuple in mrn_tuples}
+    empi_mrns = {mrn_tuple.EMPI for mrn_tuple in mrn_tuples}
+    mgh_mrns = {mrn_tuple.MGH for mrn_tuple in mrn_tuples}
+    case_number_to_raw_mrn_map = build_case_number_to_raw_mrn_map(casenum_mrn_table)
     unique_mrns = set(case_number_to_raw_mrn_map.values())
     missing_in_dfci = len(unique_mrns - dfci_mrns)
     missing_in_empi = len(unique_mrns - empi_mrns)
@@ -511,73 +474,32 @@ def collect_notes_and_write_metrics(
     casenum_ade_date_table: str,
     inter_site_mrn_table: str,
     casenum_mrn_table: str,
-    notes_dir: str,
+    inpatient_json_path: str,
+    outpatient_json_path: str,
     output_dir: str,
     fields: list[str],
     subsample_total: int = 250,
 ) -> None:
-    mrn_to_selected_date, target_space = build_mrn_to_raw_event_date_map(
+    mrn_to_selected_date, target_mrn_space = build_mrn_to_raw_event_date_map(
         casenum_ade_date_table,
         inter_site_mrn_table,
         casenum_mrn_table,
     )
-
-    def is_one_of(core_names: Iterable[str]) -> Callable[[str], bool]:
-        def __is_one_of(dirname: str) -> bool:
-            normed = dirname.strip().lower()
-            for core_name in core_names:
-                if normed.startswith(core_name):
-                    return True
-            return False
-
-        return __is_one_of
-
-    # disjunctive to conjunctive terms is weird at first but makes sense in terms of human legibility
-    name_to_predicate = {
-        "lmr": is_one_of(("lmr",)),
-        "inpatient_and_progress": is_one_of(("inpatient", "progress")),
-    }
-    dir_to_valid_mrn_and_date_notes = get_dir_to_valid_mrn_and_date_notes(
-        mrn_to_selected_date, notes_dir, {"lmr", "inpatient", "progress"}
+    filtered_inpatient_notes = get_dir_to_valid_mrn_and_date_notes(
+        mrn_to_earliest_date=mrn_to_selected_date,
+        target_mrn_space=target_mrn_space,
+        json_path=inpatient_json_path,
     )
-
-    name_to_initial_filter = {
-        "lmr": lmr_provider_type_and_specialty_filter,
-        "inpatient_and_progress": inpatient_and_progress_provider_filter,
-    }
-    synthetic_category_to_notes = merge_by_named_predicates(
-        dir_to_valid_mrn_and_date_notes, name_to_predicate
+    filtered_outpatient_notes = get_dir_to_valid_mrn_and_date_notes(
+        mrn_to_earliest_date=mrn_to_selected_date,
+        target_mrn_space=target_mrn_space,
+        json_path=outpatient_json_path,
     )
-    synthetic_category_to_title = {
-        "lmr": "LMR",
-        "inpatient_and_progress": "Inpatient+Progress",
-    }
-    mkdir(output_dir)
-    for synthetic_category, notes in synthetic_category_to_notes.items():
-        initial_filter = name_to_initial_filter.get(synthetic_category)
-        if initial_filter is None:
-            logger.info("Skipping %s", synthetic_category)
-            continue
-        initial_filtered = initial_filter(notes)
-        save_jsonl(
-            os.path.join(output_dir, "before_word_count_filter"),
-            synthetic_category,
-            initial_filtered,
-        )
-        word_count_filtered = word_count_filter(initial_filtered)
-        logger.info(
-            f"{synthetic_category_to_title[synthetic_category]} total after word count filtration - {len(word_count_filtered)}"
-        )
-        save_jsonl(
-            os.path.join(output_dir, "after_word_count_filter"),
-            synthetic_category,
-            word_count_filtered,
-        )
-        save_jsonl(
-            os.path.join(output_dir, f"abbrev_{subsample_total}"),
-            synthetic_category,
-            random.sample(word_count_filtered, subsample_total),
-        )
+    with open(os.path.join(output_dir, "filtered_inpatient.json"), mode="w") as f:
+        json.dump(filtered_inpatient_notes, f)
+
+    with open(os.path.join(output_dir, "filtered_outpatient.json"), mode="w") as f:
+        json.dump(filtered_outpatient_notes, f)
 
 
 def main():
@@ -587,7 +509,8 @@ def main():
         args.casenum_ade_date_table,
         args.inter_site_mrn_table,
         args.casenum_mrn_table,
-        args.notes_dir,
+        args.inpatient_json_path,
+        args.outpatient_json_path,
         args.output_dir,
         args.fields,
     )
