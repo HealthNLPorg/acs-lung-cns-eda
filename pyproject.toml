@@ -1,7 +1,7 @@
 [project]
-name = "acs-lung-cardiac-eda"
+name = "acs-lung-cns-eda"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["polars", "ruff", "python-dateutil", "ty", "more_itertools", "fastexcel"]
+dependencies = ["polars", "ruff", "python-dateutil", "ty", "more_itertools", "fastexcel", "ipython"]

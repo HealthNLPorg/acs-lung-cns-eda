@@ -3,11 +3,10 @@ from collections import namedtuple
 import os
 import json
 import argparse
-import random
 from enum import Enum
 from functools import partial, lru_cache
 from itertools import chain
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import cast
 import datetime
 import logging
@@ -357,7 +356,12 @@ def get_dir_to_valid_mrn_and_date_notes(
 def build_case_number_to_raw_mrn_map(
     casenum_mrn_table: str,
 ) -> Mapping[int, int]:
-    casenum_mrn_frame = pl.read_excel(casenum_mrn_table).select("casenum", "MRN")
+    casenum_mrn_frame = (
+        pl.read_excel(casenum_mrn_table)
+        .select("casenum", "MRN")
+        .filter(pl.col("MRN").map_elements(str.isnumeric))
+    )
+    print(casenum_mrn_frame)
     return {
         casenum: mrn
         for casenum, mrn in zip(
@@ -388,37 +392,79 @@ def get_inter_site_mrn_tuples(inter_site_mrn_table: str) -> set[InterSiteMRNTupl
     }
 
 
-def clean_possible_dates(possible_dates: Iterable[str | None]) -> list[str]:
-    def clean_date(possible_date: str) -> str:
-        year, month, day = possible_date.split("/")
-        if year.isnumeric() and month.isnumeric():
-            if day.isnumeric():
-                return possible_date
-            elif day == "UNK":
-                return f"{year}/{month}/1"
-        else:
-            raise ValueError(f"Incorrectly formatted date - {possible_date}")
-        return "ERROR"
+@lru_cache
+def convert_valid_date(possible_date: str) -> datetime.date | None:
+    all_components = possible_date.split("/")
+    if len(all_components) != 3:
+        logger.warning("Invalid date: %s", str(possible_date))
+        return None
+    year, month, day = all_components
+    match year, month, day:
+        case (
+            year,
+            month,
+            day,
+        ) if all(map(str.isnumeric, all_components)):
+            result = datetime.date(year=int(year), month=int(month), day=int(day))
+        case (
+            year,
+            month,
+            "UNK",
+        ) if year.isnumeric() and month.isnumeric():
+            result = datetime.date(year=int(year), month=int(month), day=1)
+        case _:
+            logger.warning("Invalid date: %s", str(possible_date))
+            result = None
+    return result
 
-    return list(map(clean_date, filter(None, possible_dates)))
+
+def sample_valid_dates(
+    casenum_toxdesc_subframe: pl.DataFrame,
+    sample_size: int = 1,
+    date_column_name: str = "NORMALIZED_DATE",
+) -> pl.DataFrame | None:
+    with_valid_dates = casenum_toxdesc_subframe.with_columns(
+        pl.col("DTS_DTTOXSTART1")
+        .map_elements(convert_valid_date, return_dtype=datetime.date)
+        .alias(date_column_name)
+    ).filter(pl.col(date_column_name).is_not_null())
+    if len(with_valid_dates) < sample_size:
+        return None
+    return with_valid_dates.sample(n=sample_size)
+
+
+def relation_category_sampling(
+    frame: pl.DataFrame,
+    relation_category: str = "No Relation",
+    target_ratio: float = 0.25,
+) -> pl.DataFrame:
+    pass
 
 
 def build_case_number_to_event_date_map(
     casenum_ade_date_table: str,
-    # not parsing to datetime.date yet, that's downstream
-) -> Mapping[int, str]:
-    case_number_to_event_dates = {}
+) -> Mapping[int, datetime.date]:
+    # First try grouping by toxdesc, selecting by date, then doing fractional sampling
+    # by d_attn
     casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table).select(
-        "casenum", "TOXDESC", "DTS_DTTOXSTART1"
+        "casenum", "TOXDESC", "D_ATTN", "DTS_DTTOXSTART1"
     )
-    for (casenum, _), sub_frame in casenum_ade_date_frame.group_by(
-        "casenum",
-        "TOXDESC",
-    ):
-        possible_dates = clean_possible_dates(sub_frame["DTS_DTTOXSTART1"])
-        if len(possible_dates) > 0:
-            case_number_to_event_dates[int(casenum)] = random.choice(possible_dates)
-    return case_number_to_event_dates
+    date_filtered_frame = pl.concat(
+        sample_valid_dates(sub_frame)
+        for _, sub_frame in casenum_ade_date_frame.group_by(
+            "casenum",
+            "TOXDESC",
+        )
+        if sample_valid_dates(sub_frame) is not None
+    )
+    relation_filtered_frame = relation_category_sampling(date_filtered_frame)
+    return {
+        case_number: normalized_date
+        for case_number, normalized_date in zip(
+            relation_filtered_frame["casenum"],
+            relation_filtered_frame["NORMALIZED_DATE"],
+        )
+    }
 
 
 def build_mrn_to_raw_event_date_map(
@@ -426,11 +472,14 @@ def build_mrn_to_raw_event_date_map(
     inter_site_mrn_table: str,
     casenum_mrn_table: str,
 ) -> tuple[Mapping[int, str], Enum]:
+    case_number_to_event_date_map = build_case_number_to_event_date_map(
+        casenum_ade_date_table
+    )
+    case_number_to_raw_mrn_map = build_case_number_to_raw_mrn_map(casenum_mrn_table)
     mrn_tuples = get_inter_site_mrn_tuples(inter_site_mrn_table)
     dfci_mrns = {mrn_tuple.DFCI for mrn_tuple in mrn_tuples}
     empi_mrns = {mrn_tuple.EMPI for mrn_tuple in mrn_tuples}
     mgh_mrns = {mrn_tuple.MGH for mrn_tuple in mrn_tuples}
-    case_number_to_raw_mrn_map = build_case_number_to_raw_mrn_map(casenum_mrn_table)
     unique_mrns = set(case_number_to_raw_mrn_map.values())
     missing_in_dfci = len(unique_mrns - dfci_mrns)
     missing_in_empi = len(unique_mrns - empi_mrns)
