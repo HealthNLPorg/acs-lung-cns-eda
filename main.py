@@ -8,6 +8,7 @@ from functools import partial, lru_cache
 from itertools import chain
 from collections.abc import Mapping, Sequence
 from typing import cast
+from math import floor
 import datetime
 import logging
 import pathlib
@@ -438,7 +439,11 @@ def relation_category_sampling(
     relation_category: str = "No Relation",
     target_ratio: float = 0.25,
 ) -> pl.DataFrame:
-    pass
+    others = frame.filter(pl.col("D_ATTN") != relation_category)
+    remainder = 1.0 - target_ratio
+    target_total = floor((1.0 / remainder) * len(others))
+    relation_target = target_total - len(others)
+    return pl.concat((relation_target, others.sample(n=relation_target)))
 
 
 def build_case_number_to_event_date_map(
