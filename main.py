@@ -181,7 +181,6 @@ def build_case_number_to_raw_mrn_map(
         .select("casenum", "MRN")
         .filter(pl.col("MRN").map_elements(str.isnumeric))
     )
-    print(casenum_mrn_frame)
     return {
         casenum: mrn
         for casenum, mrn in zip(
@@ -282,7 +281,7 @@ def build_case_number_to_event_date_map(
     # to appease type checkers
     date_filtered_frame = pl.concat(
         filter(
-            None,
+            lambda s: s is not None,
             map(
                 sample_valid_dates,
                 map(
@@ -315,10 +314,18 @@ def build_mrn_to_raw_event_date_map(
     )
     case_number_to_raw_mrn_map = build_case_number_to_raw_mrn_map(casenum_mrn_table)
     mrn_tuples = get_inter_site_mrn_tuples(inter_site_mrn_table)
-    dfci_mrns = {mrn_tuple.DFCI for mrn_tuple in mrn_tuples}
-    empi_mrns = {mrn_tuple.EMPI for mrn_tuple in mrn_tuples}
-    mgh_mrns = {mrn_tuple.MGH for mrn_tuple in mrn_tuples}
+    dfci_mrns = {
+        mrn_tuple.DFCI for mrn_tuple in mrn_tuples if mrn_tuple.DFCI is not None
+    }
+    empi_mrns = {
+        mrn_tuple.EMPI for mrn_tuple in mrn_tuples if mrn_tuple.EMPI is not None
+    }
+    mgh_mrns = {mrn_tuple.MGH for mrn_tuple in mrn_tuples if mrn_tuple.MGH is not None}
     unique_mrns = set(case_number_to_raw_mrn_map.values())
+    print(", ".join(f"{x:_}" for x in sorted(unique_mrns)[:10]))
+    print(", ".join(f"{x:_}" for x in sorted(dfci_mrns)[:10]))
+    print(", ".join(f"{x:_}" for x in sorted(empi_mrns)[:10]))
+    print(", ".join(f"{x:_}" for x in sorted(mgh_mrns)[:10]))
     missing_in_dfci = len(unique_mrns - dfci_mrns)
     missing_in_empi = len(unique_mrns - empi_mrns)
     missing_in_mgh = len(unique_mrns - mgh_mrns)
