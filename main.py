@@ -7,7 +7,6 @@ from enum import Enum
 from functools import partial, lru_cache
 from collections.abc import Mapping, Sequence
 from operator import itemgetter
-from typing import cast
 from math import floor
 import datetime
 import logging
@@ -127,51 +126,6 @@ def save_jsonl(output_dir: str, fn: str, note_json_list: list[dict]) -> None:
         f.writelines(map(__to_line, note_json_list))
 
 
-def word_count_filter(
-    note_json_list: list[dict[str, int | str]],
-    minimum_total_words: int = 500,
-) -> list[dict[str, int | str]]:
-    def has_minimum_total_words(
-        note_json: dict[str, int | str], mininum_total_words: int = minimum_total_words
-    ) -> bool:
-        return len(str(note_json.get("RPT_TEXT", "")).split()) >= mininum_total_words
-
-    return [
-        note_json for note_json in note_json_list if has_minimum_total_words(note_json)
-    ]
-
-
-def inpatient_and_progress_provider_filter(
-    note_json_list: list[dict[str, int | str]],
-) -> list[dict[str, int | str]]:
-    relevant_provider_types = {
-        "physician",
-        "nurse practitioner",
-        "physician assistant",
-        "resident",
-        "fellow",
-    }
-
-    def __has_relevant_provider_type(
-        note_json: dict[str, int | str],
-        relevant_provider_types: set[str] = relevant_provider_types,
-    ) -> bool:
-        return (
-            __normalize(cast(str, note_json.get("PROVIDER_TYPE", "")))
-            in relevant_provider_types
-        )
-
-    result = [
-        note_json
-        for note_json in note_json_list
-        if __has_relevant_provider_type(note_json)
-    ]
-    logger.info(
-        f"Total Inpatient+Progress notes before provider type filtration: {len(note_json_list)} - after: {len(result)}"
-    )
-    return result
-
-
 def has_valid_mrn_and_date(
     mrn_to_earliest_date: Mapping[int, datetime.date],
     target_mrn_space: Enum,
@@ -201,28 +155,8 @@ def raw_json_parse(json_path: str) -> list[note_dict]:
         return json.load(f)["response"]["docs"]
 
 
-def get_valid_mrn_and_date_notes_from_json(
-    mrn_to_earliest_date: dict[int, str],
-    json_path: str,
-    debug_source: str | None = None,
-) -> list[note_dict]:
-    with open(json_path) as f:
-        note_json_list = json.load(f)["response"]["docs"]
-    local_valid_mrn_and_date = partial(has_valid_mrn_and_date, mrn_to_earliest_date)
-    result = [
-        note_json for note_json in note_json_list if local_valid_mrn_and_date(note_json)
-    ]
-    logger.info(
-        f"Total {debug_source}  notes before MRN and date filtration: {len(note_json_list)} - after: {len(result)}"
-    )
-    if debug_source is not None:
-        for node_json in result:
-            node_json["debug_source"] = debug_source
-    return result
-
-
 def filter_valid_mrn_and_date_notes(
-    mrn_to_earliest_date: Mapping[int, str],
+    mrn_to_earliest_date: Mapping[int, datetime.date],
     target_mrn_space: Enum,
     json_path: str,
 ) -> Sequence[note_dict]:
@@ -375,7 +309,7 @@ def build_mrn_to_raw_event_date_map(
     casenum_ade_date_table: str,
     inter_site_mrn_table: str,
     casenum_mrn_table: str,
-) -> tuple[Mapping[int, str], Enum]:
+) -> tuple[Mapping[int, datetime.date], Enum]:
     case_number_to_event_date_map = build_case_number_to_event_date_map(
         casenum_ade_date_table
     )
