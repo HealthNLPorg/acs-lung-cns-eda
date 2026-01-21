@@ -5,8 +5,8 @@ import json
 import argparse
 from enum import Enum
 from functools import partial, lru_cache
-from itertools import chain
 from collections.abc import Mapping, Sequence
+from operator import itemgetter
 from typing import cast
 from math import floor
 import datetime
@@ -69,6 +69,10 @@ logging.basicConfig(
 note_dict = dict[str, str | int]
 
 
+SIX_WEEKS = datetime.timedelta(days=42)
+SAME_DAY = datetime.timedelta(days=0)
+
+
 class MRNSpace(Enum):
     DFCI = "DFCI"
     EMPI = "EMPI"
@@ -91,11 +95,20 @@ def parse_and_normalize_date(dt_str: str) -> datetime.date:
 
 
 @lru_cache
-def is_before(pt_earliest: str, note_date: str | None) -> bool:
+def dates_within_range(
+    pt_earliest: datetime.date,
+    note_date: str | None,
+    upper_bound: datetime.timedelta = SIX_WEEKS,
+    lower_bound: datetime.timedelta = SAME_DAY,
+) -> bool:
     if note_date is None:
         # If we don't know then rule it out
         return False
-    return parse_and_normalize_date(pt_earliest) <= parse_and_normalize_date(note_date)
+    return (
+        upper_bound
+        >= (parse_and_normalize_date(note_date) - pt_earliest)
+        >= lower_bound
+    )
 
 
 def mkdir(dir_name: str) -> None:
@@ -126,62 +139,6 @@ def word_count_filter(
     return [
         note_json for note_json in note_json_list if has_minimum_total_words(note_json)
     ]
-
-
-def lmr_provider_type_and_specialty_filter(
-    note_json_list: list[dict[str, int | str]],
-) -> list[dict[str, int | str]]:
-    relevant_provider_types = {
-        "attending",
-        "physician",
-        "nurse practitioner",
-        "physician assistant",
-        "resident",
-        "fellow",
-        "intern",
-    }
-    relevant_specialty_names = {
-        "oncology",
-        "radiation oncology",
-        "internal medicine",
-        "cardiology",
-        "hematology/oncology",
-        "surgery",
-        "thoracic",
-    }
-
-    def __has_relevant_provider_type(
-        note_json: dict[str, int | str],
-        relevant_provider_types: set[str] = relevant_provider_types,
-    ) -> bool:
-        return (
-            __normalize(cast(str, note_json.get("PROVIDER_TYPE", "")))
-            in relevant_provider_types
-        )
-
-    def __has_relevant_specialty_name(
-        note_json: dict[str, int | str],
-        relevant_specialty_names: set[str] = relevant_specialty_names,
-    ) -> bool:
-        return (
-            __normalize(cast(str, note_json.get("SPECIALTY_NAME", "")))
-            in relevant_specialty_names
-        )
-
-    def __has_criteria(
-        note_json: dict[str, int | str],
-        relevant_provider_types: set[str] = relevant_provider_types,
-        relevant_specialty_names: set[str] = relevant_specialty_names,
-    ) -> bool:
-        return __has_relevant_provider_type(
-            note_json, relevant_provider_types
-        ) and __has_relevant_specialty_name(note_json, relevant_specialty_names)
-
-    result = [note_json for note_json in note_json_list if __has_criteria(note_json)]
-    logger.info(
-        f"Total LMR notes before provider type and specialty name filtration: {len(note_json_list)} - after: {len(result)}"
-    )
-    return result
 
 
 def inpatient_and_progress_provider_filter(
@@ -216,7 +173,9 @@ def inpatient_and_progress_provider_filter(
 
 
 def has_valid_mrn_and_date(
-    mrn_to_earliest_date: dict[int, str], target_mrn_space: Enum, note_json: note_dict
+    mrn_to_earliest_date: Mapping[int, datetime.date],
+    target_mrn_space: Enum,
+    note_json: note_dict,
 ) -> bool:
     match target_mrn_space:
         case MRNSpace.DFCI:
@@ -234,31 +193,7 @@ def has_valid_mrn_and_date(
     # so don't need to worry about misses
     note_date = note_json.get("EVENT_DATE")
     # Absent dates handled here
-    return is_before(pt_earliest, note_date)
-
-
-def raw_csv_parse(csv_path: str) -> list[note_dict]:
-    return pl.read_csv(csv_path).to_dicts()
-
-
-def get_valid_mrn_and_date_notes_from_csv(
-    mrn_to_earliest_date: dict[int, str],
-    csv_path: str,
-    debug_source: str | None = None,
-) -> list[note_dict]:
-    local_valid_mrn_and_date = partial(has_valid_mrn_and_date, mrn_to_earliest_date)
-    note_json_list = pl.read_csv(csv_path).to_dicts()
-
-    result = [
-        note_json for note_json in note_json_list if local_valid_mrn_and_date(note_json)
-    ]
-    logger.info(
-        f"Total {debug_source}  notes before MRN and date filtration: {len(note_json_list)} - after: {len(result)}"
-    )
-    if debug_source is not None:
-        for node_json in result:
-            node_json["debug_source"] = debug_source
-    return result
+    return dates_within_range(pt_earliest, note_date)
 
 
 def raw_json_parse(json_path: str) -> list[note_dict]:
@@ -286,57 +221,7 @@ def get_valid_mrn_and_date_notes_from_json(
     return result
 
 
-def identify_keys_with_unique_values(
-    unique_id_debug_dict: dict[str, list[note_dict]],
-) -> None:
-    @lru_cache
-    def __norm_key(k: str) -> str:
-        return k.strip().lower()
-
-    def __is_index_key(k: str) -> bool:
-        norm_k = __norm_key(k)
-        return "mrn" in norm_k or "id" in norm_k
-
-    def __is_report_key(k: str) -> bool:
-        norm_k = __norm_key(k)
-        return "rpt" in norm_k
-
-    collected_note_dicts = [
-        _note_dict for ls in unique_id_debug_dict.values() for _note_dict in ls
-    ]
-    all_keys = {
-        k
-        for k in set(
-            chain.from_iterable(
-                _note_dict.keys() for _note_dict in collected_note_dicts
-            )
-        )
-    }
-    indexing_keys = set(filter(__is_index_key, all_keys))
-    for indexing_key in indexing_keys:
-
-        def __local_get(_note_dict: note_dict) -> str | None:
-            result = _note_dict.get(indexing_key)
-            if result is not None:
-                return str(result)
-            return result
-
-        collected_values = list(filter(None, map(__local_get, collected_note_dicts)))
-        unique_values = set(collected_values)
-        if len(collected_values) == len(unique_values):
-            logger.info(
-                f"{indexing_key} has unique values, total: {len(unique_values)}"
-            )
-        else:
-            logger.info(
-                f"{indexing_key} values not unique, total values {len(collected_values)} unique values {len(unique_values)}"
-            )
-
-    report_keys = sorted(filter(__is_report_key, all_keys))
-    logger.info(f"Report keys:\n{report_keys}")
-
-
-def get_dir_to_valid_mrn_and_date_notes(
+def filter_valid_mrn_and_date_notes(
     mrn_to_earliest_date: Mapping[int, str],
     target_mrn_space: Enum,
     json_path: str,
@@ -426,7 +311,7 @@ def sample_valid_dates(
 ) -> pl.DataFrame | None:
     with_valid_dates = casenum_toxdesc_subframe.with_columns(
         pl.col("DTS_DTTOXSTART1")
-        .map_elements(convert_valid_date, return_dtype=datetime.date)
+        .map_elements(convert_valid_date, return_dtype=pl.Date)
         .alias(date_column_name)
     ).filter(pl.col(date_column_name).is_not_null())
     if len(with_valid_dates) < sample_size:
@@ -454,13 +339,22 @@ def build_case_number_to_event_date_map(
     casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table).select(
         "casenum", "TOXDESC", "D_ATTN", "DTS_DTTOXSTART1"
     )
+    # I'll do almost any ridiculous thing
+    # to appease type checkers
     date_filtered_frame = pl.concat(
-        sample_valid_dates(sub_frame)
-        for _, sub_frame in casenum_ade_date_frame.group_by(
-            "casenum",
-            "TOXDESC",
+        filter(
+            None,
+            map(
+                sample_valid_dates,
+                map(
+                    itemgetter(1),
+                    casenum_ade_date_frame.group_by(
+                        "casenum",
+                        "TOXDESC",
+                    ),
+                ),
+            ),
         )
-        if sample_valid_dates(sub_frame) is not None
     )
     relation_filtered_frame = relation_category_sampling(date_filtered_frame)
     return {
@@ -539,12 +433,12 @@ def collect_notes_and_write_metrics(
         inter_site_mrn_table,
         casenum_mrn_table,
     )
-    filtered_inpatient_notes = get_dir_to_valid_mrn_and_date_notes(
+    filtered_inpatient_notes = filter_valid_mrn_and_date_notes(
         mrn_to_earliest_date=mrn_to_selected_date,
         target_mrn_space=target_mrn_space,
         json_path=inpatient_json_path,
     )
-    filtered_outpatient_notes = get_dir_to_valid_mrn_and_date_notes(
+    filtered_outpatient_notes = filter_valid_mrn_and_date_notes(
         mrn_to_earliest_date=mrn_to_selected_date,
         target_mrn_space=target_mrn_space,
         json_path=outpatient_json_path,
