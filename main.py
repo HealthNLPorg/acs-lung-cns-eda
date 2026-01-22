@@ -5,7 +5,7 @@ import json
 import argparse
 from enum import Enum
 from functools import lru_cache
-from collections.abc import Mapping, Sequence, Collection, Iterable
+from collections.abc import Mapping, Sequence, Collection
 from operator import itemgetter, is_not_none
 from math import floor
 import datetime
@@ -150,7 +150,7 @@ def raw_json_parse(json_path: str) -> list[note_dict]:
 #  588         "PROVIDER_TYPE":"Resource",
 #    1         "PROVIDER_TYPE":"Speech-Language Pathologist",
 def filter_inpatient_provider_types(
-    note_jsons: Iterable[note_dict],
+    note_jsons: Collection[note_dict],
 ) -> Sequence[note_dict]:
     inpatient_provider_types = {
         "Physician",
@@ -165,7 +165,15 @@ def filter_inpatient_provider_types(
         "Intern",
         "Attending",
     }
-    return []
+    filtered = [
+        note_json
+        for note_json in note_jsons
+        if note_json.get("PROVIDER_TYPE") in inpatient_provider_types
+    ]
+    logger.info(
+        f"Total in patient notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+    )
+    return filtered
 
 
 # etg@DIMJ0JW5Y9T3G cns_eda_workspace % rg "PROVIDER_TYPE\"" Outpatient\ Progress.json | sort | uniq -c
@@ -207,7 +215,7 @@ def filter_inpatient_provider_types(
 #    4         "PROVIDER_TYPE":"Technologist",
 #   21         "PROVIDER_TYPE":"Therapist",
 def filter_outpatient_provider_types(
-    note_jsons: Iterable[note_dict],
+    note_jsons: Collection[note_dict],
 ) -> Sequence[note_dict]:
     # Same as inpatient except for "Attending" and "Intern"
     # unlike with inpatient everything is accounted for
@@ -218,23 +226,32 @@ def filter_outpatient_provider_types(
         "Fellow",
         "Resident",
     }
-    return []
+    filtered = [
+        note_json
+        for note_json in note_jsons
+        if note_json.get("PROVIDER_TYPE") in outpatient_provider_types
+    ]
+
+    logger.info(
+        f"Total out patient notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+    )
+    return filtered
 
 
 def filter_valid_mrn_and_date_notes(
+    note_type: str,
+    note_dicts: Collection[note_dict],
     mrn_to_earliest_date: Mapping[int, datetime.date],
-    json_path: str,
 ) -> Sequence[note_dict]:
-    all_notes = raw_json_parse(json_path)
     filtered = [
         note_json
-        for note_json in all_notes
+        for note_json in note_dicts
         if has_valid_mrn_and_date(
             mrn_to_earliest_date=mrn_to_earliest_date, note_json=note_json
         )
     ]
     logger.info(
-        f"Total {json_path} notes before MRN and date filtration: {len(all_notes):,} - after: {len(filtered):,}"
+        f"Total {note_type} notes before MRN and date filtration: {len(note_dicts):,} - after: {len(filtered):,}"
     )
     return filtered
 
@@ -389,19 +406,32 @@ def collect_notes_and_write_metrics(
         casenum_ade_date_table,
         casenum_dfci_mrn_table,
     )
-    filtered_inpatient_notes = filter_valid_mrn_and_date_notes(
-        mrn_to_earliest_date=mrn_to_selected_date,
-        json_path=inpatient_json_path,
+
+    all_inpatient_notes = raw_json_parse(inpatient_json_path)
+    all_outpatient_notes = raw_json_parse(outpatient_json_path)
+    provider_type_filtered_inpatient_notes = filter_inpatient_provider_types(
+        all_inpatient_notes
     )
-    filtered_outpatient_notes = filter_valid_mrn_and_date_notes(
+    provider_type_filtered_outpatient_notes = filter_outpatient_provider_types(
+        all_outpatient_notes
+    )
+    mrn_date_filtered_inpatient_notes = filter_valid_mrn_and_date_notes(
+        note_type="inpatient",
+        note_dicts=provider_type_filtered_inpatient_notes,
         mrn_to_earliest_date=mrn_to_selected_date,
-        json_path=outpatient_json_path,
+    )
+    mrn_date_filtered_outpatient_notes = filter_valid_mrn_and_date_notes(
+        note_type="outpatient",
+        note_dicts=provider_type_filtered_outpatient_notes,
+        mrn_to_earliest_date=mrn_to_selected_date,
     )
     with open(os.path.join(output_dir, "filtered_inpatient.json"), mode="w") as f:
-        json.dump(filtered_inpatient_notes, f)
+        json.dump(mrn_date_filtered_inpatient_notes, f)
 
-    with open(os.path.join(output_dir, "filtered_outpatient.json"), mode="w") as f:
-        json.dump(filtered_outpatient_notes, f)
+    with open(
+        os.path.join(output_dir, "mrn_date_filtered_outpatient.json"), mode="w"
+    ) as f:
+        json.dump(mrn_date_filtered_outpatient_notes, f)
 
 
 def main():
