@@ -201,8 +201,10 @@ def relation_category_sampling(
     relation_target = target_total - len(others)
     return pl.concat(
         (
-            frame.filter(pl.col("D_ATTN") == relation_category),
-            others.sample(n=relation_target),
+            frame.filter(pl.col("D_ATTN") == relation_category).sample(
+                n=relation_target
+            ),
+            others,
         )
     )
 
