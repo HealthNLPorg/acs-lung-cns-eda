@@ -347,7 +347,7 @@ def build_casenum_filtered_frame(
     return casenum_ade_date_frame
 
 
-def build_relation_filtered_frame(
+def build_relation_and_date_filtered_frame(
     filtered_casenum_ade_date_frame: pl.DataFrame,
 ) -> pl.DataFrame:
     # I'll do almost any ridiculous thing
@@ -400,7 +400,7 @@ def build_mrn_to_event_date_map(
         casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
     )
     with_valid_dates_frame = convert_and_filter_valid_dates(casenum_filtered_frame)
-    # relation_filtered_frame = build_relation_filtered_frame(with_valid_dates_frame)
+    # relation_filtered_frame = build_relation_and_date_filtered_frame(with_valid_dates_frame)
     # return {
     #     get_mrn(case_number): (normalized_date, radiation_relation)
     #     for case_number, normalized_date, radiation_relation in zip(
