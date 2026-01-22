@@ -1,3 +1,5 @@
+import random
+from itertools import chain
 import polars as pl
 from collections import namedtuple
 import os
@@ -275,19 +277,27 @@ def collection_relation_category_sampling(
     target_ratio: float = 0.25,
     sample_seed: int | None = SAMPLE_SEED,
 ) -> Sequence[note_dict]:
-    return []
-    # others = frame.filter(pl.col("D_ATTN") != relation_category)
-    # remainder = 1.0 - target_ratio
-    # target_total = floor((1.0 / remainder) * len(others))
-    # relation_target = target_total - len(others)
-    # return pl.concat(
-    #     (
-    #         frame.filter(pl.col("D_ATTN") == relation_category).sample(
-    #             n=relation_target, seed=sample_seed
-    #         ),
-    #         others,
-    #     )
-    # )
+    others = [
+        note
+        for note, radiation_relation in notes
+        if radiation_relation != relation_category
+    ]
+    remainder = 1.0 - target_ratio
+    target_total = floor((1.0 / remainder) * len(others))
+    relation_target = target_total - len(others)
+    return list(
+        chain(
+            others,
+            random.choices(
+                [
+                    note
+                    for note, radiation_relation in notes
+                    if radiation_relation == relation_category
+                ],
+                k=relation_target,
+            ),
+        )
+    )
 
 
 def stratification(
