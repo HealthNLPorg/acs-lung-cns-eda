@@ -22,23 +22,9 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    "--inter_site_mrn_table",
+    "--casenum_dfci_mrn_table",
     type=str,
-    help="CSV containing patient names coordinated with corresponding MRNs (if any) from MGB, EMPI, and MGH",
-)
-
-parser.add_argument(
-    "--casenum_mrn_table",
-    type=str,
-    help="Excel spreadsheet (xlsx) containing case numbers coordinated with names and MRNs from some site.  Which site?  Let's find out!",
-)
-
-parser.add_argument(
-    "--fields",
-    type=str,
-    nargs="+",
-    default=["SUBJECT", "PROVIDER_TYPE", "SPECIALTY_NAME", "PROVIDER_DEPARTMENT"],
-    help="Fields for which we want to get the totals",
+    help="CSV with casenum and DFCI MRNS",
 )
 
 parser.add_argument(
@@ -128,16 +114,9 @@ def save_jsonl(output_dir: str, fn: str, note_json_list: list[dict]) -> None:
 
 def has_valid_mrn_and_date(
     mrn_to_earliest_date: Mapping[int, datetime.date],
-    target_mrn_space: Enum,
     note_json: note_dict,
 ) -> bool:
-    match target_mrn_space:
-        case MRNSpace.DFCI:
-            mrn_key = "DFCI_MRN"
-        case _:
-            raise NotImplementedError(
-                "Turns out it wasn't DFCI. Need to find the right MRN key"
-            )
+    mrn_key = "DFCI_MRN"
     mrn = int(note_json[mrn_key])
     if mrn not in mrn_to_earliest_date:
         # invalid MRN
@@ -157,13 +136,10 @@ def raw_json_parse(json_path: str) -> list[note_dict]:
 
 def filter_valid_mrn_and_date_notes(
     mrn_to_earliest_date: Mapping[int, datetime.date],
-    target_mrn_space: Enum,
     json_path: str,
 ) -> Sequence[note_dict]:
     all_notes = raw_json_parse(json_path)
-    local_valid_mrn_and_date = partial(
-        has_valid_mrn_and_date, mrn_to_earliest_date, target_mrn_space
-    )
+    local_valid_mrn_and_date = partial(has_valid_mrn_and_date, mrn_to_earliest_date)
     filtered = [
         note_json for note_json in all_notes if local_valid_mrn_and_date(note_json)
     ]
@@ -171,44 +147,6 @@ def filter_valid_mrn_and_date_notes(
         f"Total {json_path} notes before MRN and date filtration: {len(all_notes)} - after: {len(filtered)}"
     )
     return filtered
-
-
-def build_case_number_to_raw_mrn_map(
-    casenum_mrn_table: str,
-) -> Mapping[int, int]:
-    casenum_mrn_frame = (
-        pl.read_excel(casenum_mrn_table)
-        .select("casenum", "MRN")
-        .filter(pl.col("MRN").map_elements(str.isnumeric))
-    )
-    return {
-        casenum: mrn
-        for casenum, mrn in zip(
-            casenum_mrn_frame["casenum"].cast(pl.Int64),
-            casenum_mrn_frame["MRN"].cast(pl.Int64),
-        )
-    }
-
-
-def get_inter_site_mrn_tuples(inter_site_mrn_table: str) -> set[InterSiteMRNTuple]:
-    def row_dict_to_named_tuple(
-        row_dict: Mapping[str, int | None],
-    ) -> InterSiteMRNTuple:
-        return InterSiteMRNTuple(
-            row_dict.get("DFCI_MRN"),
-            row_dict.get("EMPI"),
-            row_dict.get("MGH_MRN"),
-        )
-
-    inter_site_mrn_frame = (
-        pl.read_csv(inter_site_mrn_table)
-        .select("DFCI_MRN", "EMPI", "MGH_MRN")
-        .filter(~pl.all_horizontal(pl.all().is_null()))
-    )
-    return {
-        row_dict_to_named_tuple(row_dict)
-        for row_dict in inter_site_mrn_frame.to_dicts()
-    }
 
 
 @lru_cache
@@ -270,6 +208,7 @@ def relation_category_sampling(
 
 
 def build_case_number_to_event_date_map(
+    casenum_to_dfci_mrn_map: Mapping[int, int],
     casenum_ade_date_table: str,
 ) -> Mapping[int, datetime.date]:
     # First try grouping by toxdesc, selecting by date, then doing fractional sampling
@@ -277,6 +216,13 @@ def build_case_number_to_event_date_map(
     casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table).select(
         "casenum", "TOXDESC", "D_ATTN", "DTS_DTTOXSTART1"
     )
+    print("Before casenum filtering")
+    print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True))
+    casenum_ade_date_frame = casenum_ade_date_frame.filter(
+        pl.col("casenum").is_in(casenum_to_dfci_mrn_map.keys())
+    )
+    print("After valid DFCI MRN filtering")
+    print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True))
     # I'll do almost any ridiculous thing
     # to appease type checkers
     date_filtered_frame = pl.concat(
@@ -294,7 +240,12 @@ def build_case_number_to_event_date_map(
             ),
         )
     )
+
+    print("After TOXDESC etc filtering")
+    print(date_filtered_frame["D_ATTN"].value_counts(normalize=True))
     relation_filtered_frame = relation_category_sampling(date_filtered_frame)
+    print("After category resampling")
+    print(relation_filtered_frame["D_ATTN"].value_counts(normalize=True))
     return {
         case_number: normalized_date
         for case_number, normalized_date in zip(
@@ -304,89 +255,39 @@ def build_case_number_to_event_date_map(
     }
 
 
-def build_mrn_to_raw_event_date_map(
+def build_mrn_to_event_date_map(
     casenum_ade_date_table: str,
-    inter_site_mrn_table: str,
-    casenum_mrn_table: str,
-) -> tuple[Mapping[int, datetime.date], Enum]:
-    case_number_to_event_date_map = build_case_number_to_event_date_map(
-        casenum_ade_date_table
+    casenum_dfci_mrn_table: str,
+) -> Mapping[int, datetime.date]:
+    casenum_dfci_mrn_df = pl.read_csv(casenum_dfci_mrn_table)
+    casenum_to_dfci_mrn_map = {
+        casenum: DFCI_MRN
+        for casenum, DFCI_MRN in zip(
+            casenum_dfci_mrn_df["casenum"], casenum_dfci_mrn_df["DFCI_MRN"]
+        )
+    }
+    return build_case_number_to_event_date_map(
+        casenum_to_dfci_mrn_map, casenum_ade_date_table
     )
-    case_number_to_raw_mrn_map = build_case_number_to_raw_mrn_map(casenum_mrn_table)
-    mrn_tuples = get_inter_site_mrn_tuples(inter_site_mrn_table)
-    dfci_mrns = {
-        mrn_tuple.DFCI for mrn_tuple in mrn_tuples if mrn_tuple.DFCI is not None
-    }
-    empi_mrns = {
-        mrn_tuple.EMPI for mrn_tuple in mrn_tuples if mrn_tuple.EMPI is not None
-    }
-    mgh_mrns = {mrn_tuple.MGH for mrn_tuple in mrn_tuples if mrn_tuple.MGH is not None}
-    unique_mrns = set(case_number_to_raw_mrn_map.values())
-    print(", ".join(f"{x:_}" for x in sorted(unique_mrns)[:10]))
-    print(", ".join(f"{x:_}" for x in sorted(dfci_mrns)[:10]))
-    print(", ".join(f"{x:_}" for x in sorted(empi_mrns)[:10]))
-    print(", ".join(f"{x:_}" for x in sorted(mgh_mrns)[:10]))
-    missing_in_dfci = len(unique_mrns - dfci_mrns)
-    missing_in_empi = len(unique_mrns - empi_mrns)
-    missing_in_mgh = len(unique_mrns - mgh_mrns)
-    space_to_missing = {
-        MRNSpace.DFCI.value: missing_in_dfci,
-        MRNSpace.EMPI.value: missing_in_empi,
-        MRNSpace.MGH.value: missing_in_mgh,
-    }
-    covered_spaces = {
-        space: missing for space, missing in space_to_missing.items() if missing == 0
-    }
-    target_space = None
-    match len(covered_spaces):
-        case 1:
-            target_space = MRNSpace(next(iter(covered_spaces.keys())))
-            logger.info("Using %s for MRNs", target_space)
-        case 0:
-            raise ValueError(
-                f"None of {', '.join(sorted(covered_spaces.keys()))} are covered"
-            )
-        case _:
-            raise ValueError(
-                f"More than one of {', '.join(sorted(covered_spaces.keys()))} are covered"
-            )
-    case_number_to_event_date_map = build_case_number_to_event_date_map(
-        casenum_ade_date_table
-    )
-    mrn_to_event_dates_map = {}
-    for case_number, event_date in case_number_to_event_date_map.items():
-        # case number not included if not enough MRNs
-        # so not worrying about those
-        mrn = case_number_to_raw_mrn_map.get(case_number)
-        if mrn is not None:
-            mrn_to_event_dates_map[mrn] = event_date
-    return mrn_to_event_dates_map, target_space
 
 
 def collect_notes_and_write_metrics(
-    # pt_record_csv: str,
     casenum_ade_date_table: str,
-    inter_site_mrn_table: str,
-    casenum_mrn_table: str,
+    casenum_dfci_mrn_table: str,
     inpatient_json_path: str,
     outpatient_json_path: str,
     output_dir: str,
-    fields: list[str],
-    subsample_total: int = 250,
 ) -> None:
-    mrn_to_selected_date, target_mrn_space = build_mrn_to_raw_event_date_map(
+    mrn_to_selected_date = build_mrn_to_event_date_map(
         casenum_ade_date_table,
-        inter_site_mrn_table,
-        casenum_mrn_table,
+        casenum_dfci_mrn_table,
     )
     filtered_inpatient_notes = filter_valid_mrn_and_date_notes(
         mrn_to_earliest_date=mrn_to_selected_date,
-        target_mrn_space=target_mrn_space,
         json_path=inpatient_json_path,
     )
     filtered_outpatient_notes = filter_valid_mrn_and_date_notes(
         mrn_to_earliest_date=mrn_to_selected_date,
-        target_mrn_space=target_mrn_space,
         json_path=outpatient_json_path,
     )
     with open(os.path.join(output_dir, "filtered_inpatient.json"), mode="w") as f:
@@ -399,14 +300,11 @@ def collect_notes_and_write_metrics(
 def main():
     args = parser.parse_args()
     collect_notes_and_write_metrics(
-        # args.pt_record_csv,
         args.casenum_ade_date_table,
-        args.inter_site_mrn_table,
-        args.casenum_mrn_table,
+        args.casenum_dfci_mrn_table,
         args.inpatient_json_path,
         args.outpatient_json_path,
         args.output_dir,
-        args.fields,
     )
 
 
