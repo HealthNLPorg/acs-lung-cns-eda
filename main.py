@@ -4,9 +4,9 @@ import os
 import json
 import argparse
 from enum import Enum
-from functools import partial, lru_cache
-from collections.abc import Mapping, Sequence
-from operator import itemgetter
+from functools import lru_cache
+from collections.abc import Mapping, Sequence, Collection
+from operator import itemgetter, is_not_none
 from math import floor
 import datetime
 import logging
@@ -139,9 +139,12 @@ def filter_valid_mrn_and_date_notes(
     json_path: str,
 ) -> Sequence[note_dict]:
     all_notes = raw_json_parse(json_path)
-    local_valid_mrn_and_date = partial(has_valid_mrn_and_date, mrn_to_earliest_date)
     filtered = [
-        note_json for note_json in all_notes if local_valid_mrn_and_date(note_json)
+        note_json
+        for note_json in all_notes
+        if has_valid_mrn_and_date(
+            mrn_to_earliest_date=mrn_to_earliest_date, note_json=note_json
+        )
     ]
     logger.info(
         f"Total {json_path} notes before MRN and date filtration: {len(all_notes)} - after: {len(filtered)}"
@@ -209,10 +212,10 @@ def relation_category_sampling(
     )
 
 
-def build_case_number_to_event_date_map(
-    casenum_to_dfci_mrn_map: Mapping[int, int],
+def build_relation_filtered_frame(
+    valid_casenums: Collection[int],
     casenum_ade_date_table: str,
-) -> Mapping[int, datetime.date]:
+) -> pl.DataFrame:
     # First try grouping by toxdesc, selecting by date, then doing fractional sampling
     # by d_attn
     casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table).select(
@@ -221,7 +224,7 @@ def build_case_number_to_event_date_map(
     print(f"Before casenum filtering - total instances {len(casenum_ade_date_frame)}")
     print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True))
     casenum_ade_date_frame = casenum_ade_date_frame.filter(
-        pl.col("casenum").is_in(casenum_to_dfci_mrn_map.keys())
+        pl.col("casenum").is_in(valid_casenums)
     )
     print(
         f"After valid DFCI MRN filtering - total instances {len(casenum_ade_date_frame)}"
@@ -231,7 +234,7 @@ def build_case_number_to_event_date_map(
     # to appease type checkers
     date_filtered_frame = pl.concat(
         filter(
-            lambda s: s is not None,
+            is_not_none,
             map(
                 sample_valid_dates,
                 map(
@@ -250,13 +253,7 @@ def build_case_number_to_event_date_map(
     relation_filtered_frame = relation_category_sampling(date_filtered_frame)
     print(f"After category resampling - total instances {len(relation_filtered_frame)}")
     print(relation_filtered_frame["D_ATTN"].value_counts(normalize=True))
-    return {
-        case_number: normalized_date
-        for case_number, normalized_date in zip(
-            relation_filtered_frame["casenum"],
-            relation_filtered_frame["NORMALIZED_DATE"],
-        )
-    }
+    return relation_filtered_frame
 
 
 def build_mrn_to_event_date_map(
@@ -270,9 +267,23 @@ def build_mrn_to_event_date_map(
             casenum_dfci_mrn_df["casenum"], casenum_dfci_mrn_df["DFCI_MRN"]
         )
     }
-    return build_case_number_to_event_date_map(
-        casenum_to_dfci_mrn_map, casenum_ade_date_table
+    relation_filtered_frame = build_relation_filtered_frame(
+        casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
     )
+
+    def get_mrn(case_number: int) -> int:
+        mrn = casenum_to_dfci_mrn_map.get(case_number)
+        if mrn is None:
+            raise ValueError(f"No MRN for {case_number} even after filtering")
+        return mrn
+
+    return {
+        get_mrn(case_number): normalized_date
+        for case_number, normalized_date in zip(
+            relation_filtered_frame["casenum"],
+            relation_filtered_frame["NORMALIZED_DATE"],
+        )
+    }
 
 
 def collect_notes_and_write_metrics(
