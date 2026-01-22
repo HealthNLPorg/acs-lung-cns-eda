@@ -5,13 +5,15 @@ import json
 import argparse
 from enum import Enum
 from functools import lru_cache
-from collections.abc import Mapping, Sequence, Collection
+from collections.abc import Mapping, Sequence, Collection, Iterable
 from operator import itemgetter, is_not_none
 from math import floor
 import datetime
 import logging
 import pathlib
 from dateutil.parser import parse
+
+SAMPLE_SEED = 42
 
 parser = argparse.ArgumentParser(description="")
 
@@ -134,6 +136,91 @@ def raw_json_parse(json_path: str) -> list[note_dict]:
         return json.load(f)["response"]["docs"]
 
 
+# etg@DIMJ0JW5Y9T3G cns_eda_workspace % rg "PROVIDER_TYPE\"" Inpatient\ Progress.json | sort | uniq -c
+#   12         "PROVIDER_TYPE":"Anesthesiologist",
+#   10         "PROVIDER_TYPE":"Dentist",
+#    2         "PROVIDER_TYPE":"Fellow",
+#    1         "PROVIDER_TYPE":"Licensed Nurse",
+#   27         "PROVIDER_TYPE":"Nurse Practitioner",
+#    1         "PROVIDER_TYPE":"Occupational Therapist",
+#    3         "PROVIDER_TYPE":"Physical Therapist",
+#  137         "PROVIDER_TYPE":"Physician Assistant",
+# 2501         "PROVIDER_TYPE":"Physician",
+#   30         "PROVIDER_TYPE":"Registered Nurse",
+#  588         "PROVIDER_TYPE":"Resource",
+#    1         "PROVIDER_TYPE":"Speech-Language Pathologist",
+def filter_inpatient_provider_types(
+    note_jsons: Iterable[note_dict],
+) -> Sequence[note_dict]:
+    inpatient_provider_types = {
+        "Physician",
+        "Physician Assistant",
+        "Nurse Practitioner",
+        "Fellow",
+        # These were from Danielle but
+        # rg "PROVIDER_TYPE\"" Inpatient\ Progress.json | sort | uniq -c
+        # didn't turn any of these up
+        # if we want to use any other types they're listed above
+        "Resident",
+        "Intern",
+        "Attending",
+    }
+    return []
+
+
+# etg@DIMJ0JW5Y9T3G cns_eda_workspace % rg "PROVIDER_TYPE\"" Outpatient\ Progress.json | sort | uniq -c
+#  105         "PROVIDER_TYPE":"Acupuncturist",
+#    7         "PROVIDER_TYPE":"Ancillary",
+#   91         "PROVIDER_TYPE":"Anesthesiologist",
+#   14         "PROVIDER_TYPE":"Audiologist",
+#    3         "PROVIDER_TYPE":"Case Manager",
+#    4         "PROVIDER_TYPE":"Community Health Worker",
+#   49         "PROVIDER_TYPE":"Coordinator",
+#    6         "PROVIDER_TYPE":"Counselor",
+#   14         "PROVIDER_TYPE":"Dentist",
+#    1         "PROVIDER_TYPE":"Embryologist",
+#   20         "PROVIDER_TYPE":"Fellow",
+#  279         "PROVIDER_TYPE":"Generic Provider",
+#   24         "PROVIDER_TYPE":"Genetic Counselor",
+#  147         "PROVIDER_TYPE":"Licensed Dietitian/Nutritionist",
+#    9         "PROVIDER_TYPE":"Licensed Nurse",
+#   10         "PROVIDER_TYPE":"Medical Assistant",
+# 2882         "PROVIDER_TYPE":"Nurse Practitioner",
+#  104         "PROVIDER_TYPE":"Occupational Therapist",
+#    2         "PROVIDER_TYPE":"Patient Care/Nursing Assistant",
+#   18         "PROVIDER_TYPE":"Pharmacist",
+#    2         "PROVIDER_TYPE":"Physical Therapist Assistant",
+#  317         "PROVIDER_TYPE":"Physical Therapist",
+#  825         "PROVIDER_TYPE":"Physician Assistant",
+# 8184         "PROVIDER_TYPE":"Physician",
+#   13         "PROVIDER_TYPE":"Podiatrist",
+#   14         "PROVIDER_TYPE":"Psychologist",
+#   63         "PROVIDER_TYPE":"Registered Dietitian",
+# 5762         "PROVIDER_TYPE":"Registered Nurse",
+#    3         "PROVIDER_TYPE":"Resident",
+#  161         "PROVIDER_TYPE":"Resource",
+#    4         "PROVIDER_TYPE":"Respiratory Therapist",
+#  952         "PROVIDER_TYPE":"Social Worker",
+#  105         "PROVIDER_TYPE":"Speech-Language Pathologist",
+#    2         "PROVIDER_TYPE":"Spiritual Care Student",
+#   20         "PROVIDER_TYPE":"Spiritual Care",
+#    4         "PROVIDER_TYPE":"Technologist",
+#   21         "PROVIDER_TYPE":"Therapist",
+def filter_outpatient_provider_types(
+    note_jsons: Iterable[note_dict],
+) -> Sequence[note_dict]:
+    # Same as inpatient except for "Attending" and "Intern"
+    # unlike with inpatient everything is accounted for
+    outpatient_provider_types = {
+        "Physician",
+        "Physician Assistant",
+        "Nurse Practitioner",
+        "Fellow",
+        "Resident",
+    }
+    return []
+
+
 def filter_valid_mrn_and_date_notes(
     mrn_to_earliest_date: Mapping[int, datetime.date],
     json_path: str,
@@ -182,21 +269,24 @@ def sample_valid_dates(
     casenum_toxdesc_subframe: pl.DataFrame,
     sample_size: int = 1,
     date_column_name: str = "NORMALIZED_DATE",
+    sample_seed: int | None = SAMPLE_SEED,
 ) -> pl.DataFrame | None:
     with_valid_dates = casenum_toxdesc_subframe.with_columns(
         pl.col("DTS_DTTOXSTART1")
+        # unlike with inpatient everything is accounted for
         .map_elements(convert_valid_date, return_dtype=pl.Date)
         .alias(date_column_name)
     ).filter(pl.col(date_column_name).is_not_null())
     if len(with_valid_dates) < sample_size:
         return None
-    return with_valid_dates.sample(n=sample_size)
+    return with_valid_dates.sample(n=sample_size, seed=sample_seed)
 
 
 def relation_category_sampling(
     frame: pl.DataFrame,
     relation_category: str = "No Relation",
     target_ratio: float = 0.25,
+    sample_seed: int | None = SAMPLE_SEED,
 ) -> pl.DataFrame:
     others = frame.filter(pl.col("D_ATTN") != relation_category)
     remainder = 1.0 - target_ratio
@@ -205,7 +295,7 @@ def relation_category_sampling(
     return pl.concat(
         (
             frame.filter(pl.col("D_ATTN") == relation_category).sample(
-                n=relation_target
+                n=relation_target, seed=sample_seed
             ),
             others,
         )
@@ -222,14 +312,14 @@ def build_relation_filtered_frame(
         "casenum", "TOXDESC", "D_ATTN", "DTS_DTTOXSTART1"
     )
     print(f"Before casenum filtering - total instances {len(casenum_ade_date_frame)}")
-    print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True))
+    print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
     casenum_ade_date_frame = casenum_ade_date_frame.filter(
         pl.col("casenum").is_in(valid_casenums)
     )
     print(
         f"After valid DFCI MRN filtering - total instances {len(casenum_ade_date_frame)}"
     )
-    print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True))
+    print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
     # I'll do almost any ridiculous thing
     # to appease type checkers
     date_filtered_frame = pl.concat(
@@ -249,10 +339,12 @@ def build_relation_filtered_frame(
     )
 
     print(f"After TOXDESC etc filtering - total instances {len(date_filtered_frame)}")
-    print(date_filtered_frame["D_ATTN"].value_counts(normalize=True))
+    print(date_filtered_frame["D_ATTN"].value_counts(normalize=True, sort=True))
     relation_filtered_frame = relation_category_sampling(date_filtered_frame)
+    print("Exact adverse event counts (one per patient)")
+    print(relation_filtered_frame["D_ATTN"].value_counts())
     print(f"After category resampling - total instances {len(relation_filtered_frame)}")
-    print(relation_filtered_frame["D_ATTN"].value_counts(normalize=True))
+    print(relation_filtered_frame["D_ATTN"].value_counts(normalize=True, sort=True))
     return relation_filtered_frame
 
 
