@@ -147,7 +147,7 @@ def filter_valid_mrn_and_date_notes(
         )
     ]
     logger.info(
-        f"Total {json_path} notes before MRN and date filtration: {len(all_notes)} - after: {len(filtered)}"
+        f"Total {json_path} notes before MRN and date filtration: {len(all_notes):,} - after: {len(filtered):,}"
     )
     return filtered
 
