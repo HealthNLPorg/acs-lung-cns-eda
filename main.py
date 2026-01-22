@@ -400,22 +400,15 @@ def build_mrn_to_event_date_map(
         casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
     )
     with_valid_dates_frame = convert_and_filter_valid_dates(casenum_filtered_frame)
-    # relation_filtered_frame = build_relation_and_date_filtered_frame(with_valid_dates_frame)
-    # return {
-    #     get_mrn(case_number): (normalized_date, radiation_relation)
-    #     for case_number, normalized_date, radiation_relation in zip(
-    #         relation_filtered_frame["casenum"],
-    #         relation_filtered_frame["NORMALIZED_DATE"],
-    #         relation_filtered_frame["D_ATTN"],
-    #     )
-    # }
-
+    relation_filtered_frame = build_relation_and_date_filtered_frame(
+        with_valid_dates_frame
+    )
     return {
         get_mrn(case_number): (normalized_date, radiation_relation)
         for case_number, normalized_date, radiation_relation in zip(
-            with_valid_dates_frame["casenum"],
-            with_valid_dates_frame["NORMALIZED_DATE"],
-            with_valid_dates_frame["D_ATTN"],
+            relation_filtered_frame["casenum"],
+            relation_filtered_frame["NORMALIZED_DATE"],
+            relation_filtered_frame["D_ATTN"],
         )
     }
 
