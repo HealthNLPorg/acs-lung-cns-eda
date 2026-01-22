@@ -115,7 +115,7 @@ def save_jsonl(output_dir: str, fn: str, note_json_list: list[dict]) -> None:
 
 
 def has_valid_mrn_and_date(
-    mrn_to_earliest_date: Mapping[int, datetime.date],
+    mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
     note_json: note_dict,
 ) -> bool:
     mrn_key = "DFCI_MRN"
@@ -241,7 +241,7 @@ def filter_outpatient_provider_types(
 def filter_valid_mrn_and_date_notes(
     note_type: str,
     note_dicts: Collection[note_dict],
-    mrn_to_earliest_date: Mapping[int, datetime.date],
+    mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
 ) -> Sequence[note_dict]:
     filtered = [
         note_json
@@ -319,7 +319,7 @@ def relation_category_sampling(
     )
 
 
-def build_relation_filtered_frame(
+def build_casenum_filtered_frame(
     valid_casenums: Collection[int],
     casenum_ade_date_table: str,
 ) -> pl.DataFrame:
@@ -337,6 +337,12 @@ def build_relation_filtered_frame(
         f"After valid DFCI MRN filtering - total instances {len(casenum_ade_date_frame)}"
     )
     print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
+    return casenum_ade_date_frame
+
+
+def build_relation_filtered_frame(
+    filtered_casenum_ade_date_frame: pl.DataFrame,
+) -> pl.DataFrame:
     # I'll do almost any ridiculous thing
     # to appease type checkers
     date_filtered_frame = pl.concat(
@@ -346,7 +352,7 @@ def build_relation_filtered_frame(
                 sample_valid_dates,
                 map(
                     itemgetter(1),
-                    casenum_ade_date_frame.group_by(
+                    filtered_casenum_ade_date_frame.group_by(
                         "casenum",
                         "TOXDESC",
                     ),
@@ -368,7 +374,7 @@ def build_relation_filtered_frame(
 def build_mrn_to_event_date_map(
     casenum_ade_date_table: str,
     casenum_dfci_mrn_table: str,
-) -> Mapping[int, datetime.date]:
+) -> Mapping[int, tuple[datetime.date, str]]:
     casenum_dfci_mrn_df = pl.read_csv(casenum_dfci_mrn_table)
     casenum_to_dfci_mrn_map = {
         casenum: DFCI_MRN
@@ -376,9 +382,6 @@ def build_mrn_to_event_date_map(
             casenum_dfci_mrn_df["casenum"], casenum_dfci_mrn_df["DFCI_MRN"]
         )
     }
-    relation_filtered_frame = build_relation_filtered_frame(
-        casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
-    )
 
     def get_mrn(case_number: int) -> int:
         mrn = casenum_to_dfci_mrn_map.get(case_number)
@@ -386,11 +389,25 @@ def build_mrn_to_event_date_map(
             raise ValueError(f"No MRN for {case_number} even after filtering")
         return mrn
 
+    casenum_filtered_frame = build_casenum_filtered_frame(
+        casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
+    )
+    # relation_filtered_frame = build_relation_filtered_frame(casenum_filtered_frame)
+    # return {
+    #     get_mrn(case_number): (normalized_date, radiation_relation)
+    #     for case_number, normalized_date, radiation_relation in zip(
+    #         relation_filtered_frame["casenum"],
+    #         relation_filtered_frame["NORMALIZED_DATE"],
+    #         relation_filtered_frame["D_ATTN"],
+    #     )
+    # }
+
     return {
-        get_mrn(case_number): normalized_date
-        for case_number, normalized_date in zip(
-            relation_filtered_frame["casenum"],
-            relation_filtered_frame["NORMALIZED_DATE"],
+        get_mrn(case_number): (normalized_date, radiation_relation)
+        for case_number, normalized_date, radiation_relation in zip(
+            casenum_filtered_frame["casenum"],
+            casenum_filtered_frame["NORMALIZED_DATE"],
+            casenum_filtered_frame["D_ATTN"],
         )
     }
 
