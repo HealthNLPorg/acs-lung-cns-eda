@@ -216,12 +216,14 @@ def build_case_number_to_event_date_map(
     casenum_ade_date_frame = pl.read_excel(casenum_ade_date_table).select(
         "casenum", "TOXDESC", "D_ATTN", "DTS_DTTOXSTART1"
     )
-    print("Before casenum filtering")
+    print(f"Before casenum filtering - total instances {len(casenum_ade_date_frame)}")
     print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True))
     casenum_ade_date_frame = casenum_ade_date_frame.filter(
         pl.col("casenum").is_in(casenum_to_dfci_mrn_map.keys())
     )
-    print("After valid DFCI MRN filtering")
+    print(
+        f"After valid DFCI MRN filtering - total instances {len(casenum_ade_date_frame)}"
+    )
     print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True))
     # I'll do almost any ridiculous thing
     # to appease type checkers
@@ -241,10 +243,10 @@ def build_case_number_to_event_date_map(
         )
     )
 
-    print("After TOXDESC etc filtering")
+    print(f"After TOXDESC etc filtering - total instances {len(date_filtered_frame)}")
     print(date_filtered_frame["D_ATTN"].value_counts(normalize=True))
     relation_filtered_frame = relation_category_sampling(date_filtered_frame)
-    print("After category resampling")
+    print(f"After category resampling - total instances {len(relation_filtered_frame)}")
     print(relation_filtered_frame["D_ATTN"].value_counts(normalize=True))
     return {
         case_number: normalized_date
