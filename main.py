@@ -123,7 +123,7 @@ def has_valid_mrn_and_date(
     if mrn not in mrn_to_earliest_date:
         # invalid MRN
         return False
-    pt_earliest = mrn_to_earliest_date.get(mrn)
+    pt_earliest, _ = mrn_to_earliest_date[mrn]
     # Everything in the table has an earliest date
     # so don't need to worry about misses
     note_date = note_json.get("EVENT_DATE")
@@ -282,21 +282,28 @@ def convert_valid_date(possible_date: str) -> datetime.date | None:
     return result
 
 
-def sample_valid_dates(
-    casenum_toxdesc_subframe: pl.DataFrame,
-    sample_size: int = 1,
+def convert_and_filter_valid_dates(
+    frame: pl.DataFrame,
     date_column_name: str = "NORMALIZED_DATE",
-    sample_seed: int | None = SAMPLE_SEED,
-) -> pl.DataFrame | None:
-    with_valid_dates = casenum_toxdesc_subframe.with_columns(
+) -> pl.DataFrame:
+    return frame.with_columns(
         pl.col("DTS_DTTOXSTART1")
         # unlike with inpatient everything is accounted for
         .map_elements(convert_valid_date, return_dtype=pl.Date)
         .alias(date_column_name)
     ).filter(pl.col(date_column_name).is_not_null())
-    if len(with_valid_dates) < sample_size:
+
+
+def sample_valid_dates(
+    casenum_toxdesc_with_valid_dates_subframe: pl.DataFrame,
+    sample_size: int = 1,
+    sample_seed: int | None = SAMPLE_SEED,
+) -> pl.DataFrame | None:
+    if len(casenum_toxdesc_with_valid_dates_subframe) < sample_size:
         return None
-    return with_valid_dates.sample(n=sample_size, seed=sample_seed)
+    return casenum_toxdesc_with_valid_dates_subframe.sample(
+        n=sample_size, seed=sample_seed
+    )
 
 
 def relation_category_sampling(
@@ -392,7 +399,8 @@ def build_mrn_to_event_date_map(
     casenum_filtered_frame = build_casenum_filtered_frame(
         casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
     )
-    # relation_filtered_frame = build_relation_filtered_frame(casenum_filtered_frame)
+    with_valid_dates_frame = convert_and_filter_valid_dates(casenum_filtered_frame)
+    # relation_filtered_frame = build_relation_filtered_frame(with_valid_dates_frame)
     # return {
     #     get_mrn(case_number): (normalized_date, radiation_relation)
     #     for case_number, normalized_date, radiation_relation in zip(
@@ -405,9 +413,9 @@ def build_mrn_to_event_date_map(
     return {
         get_mrn(case_number): (normalized_date, radiation_relation)
         for case_number, normalized_date, radiation_relation in zip(
-            casenum_filtered_frame["casenum"],
-            casenum_filtered_frame["NORMALIZED_DATE"],
-            casenum_filtered_frame["D_ATTN"],
+            with_valid_dates_frame["casenum"],
+            with_valid_dates_frame["NORMALIZED_DATE"],
+            with_valid_dates_frame["D_ATTN"],
         )
     }
 
