@@ -1,3 +1,5 @@
+import random
+from itertools import chain
 import polars as pl
 from collections import namedtuple
 import os
@@ -45,6 +47,21 @@ parser.add_argument(
     type=str,
     default=".",
     help="Directory for outputting table",
+)
+parser.add_argument(
+    "--filter_to_single_date",
+    action="store_true",
+    help="Starting at the beginning",
+)
+parser.add_argument(
+    "--stratify_beginning",
+    action="store_true",
+    help="Starting at the beginning",
+)
+parser.add_argument(
+    "--stratify_end",
+    action="store_true",
+    help="Starting at the beginning",
 )
 logger = logging.getLogger(__name__)
 
@@ -238,22 +255,78 @@ def filter_outpatient_provider_types(
     return filtered
 
 
+def get_radiation_relation_label(
+    note_json: note_dict,
+    mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
+) -> str:
+    # since has.. is the filter predicate we don't
+    # have to worry if the MRN isn't in the table
+    mrn_key = "DFCI_MRN"
+    mrn = int(note_json[mrn_key])
+    _, radiation_relation = mrn_to_earliest_date[mrn]
+    return radiation_relation
+
+
+def collection_relation_category_sampling(
+    notes: Collection[tuple[note_dict, str]],
+    relation_category: str = "No Relation",
+    target_ratio: float = 0.25,
+    sample_seed: int | None = SAMPLE_SEED,
+) -> Sequence[note_dict]:
+    others = [
+        note
+        for note, radiation_relation in notes
+        if radiation_relation != relation_category
+    ]
+    remainder = 1.0 - target_ratio
+    target_total = floor((1.0 / remainder) * len(others))
+    relation_target = target_total - len(others)
+    return list(
+        chain(
+            others,
+            random.choices(
+                [
+                    note
+                    for note, radiation_relation in notes
+                    if radiation_relation == relation_category
+                ],
+                k=relation_target,
+            ),
+        )
+    )
+
+
+def stratification(
+    notes: Collection[tuple[note_dict, str]], stratify_end: bool
+) -> Sequence[note_dict]:
+    if not stratify_end:
+        return list(map(itemgetter(0), notes))
+    return collection_relation_category_sampling(notes)
+
+
 def filter_valid_mrn_and_date_notes(
     note_type: str,
     note_dicts: Collection[note_dict],
     mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
+    stratify_end: bool,
 ) -> Sequence[note_dict]:
     filtered = [
-        note_json
+        (
+            note_json,
+            get_radiation_relation_label(
+                note_json=note_json, mrn_to_earliest_date=mrn_to_earliest_date
+            ),
+        )
         for note_json in note_dicts
         if has_valid_mrn_and_date(
             mrn_to_earliest_date=mrn_to_earliest_date, note_json=note_json
         )
     ]
+    result = stratification(notes=filtered, stratify_end=stratify_end)
     logger.info(
-        f"Total {note_type} notes before MRN and date filtration: {len(note_dicts):,} - after: {len(filtered):,}"
+        f"Total {note_type} notes before MRN and date filtration: {len(note_dicts):,} - after: {len(result):,}"
     )
-    return filtered
+    return result
 
 
 @lru_cache
@@ -347,9 +420,7 @@ def build_casenum_filtered_frame(
     return casenum_ade_date_frame
 
 
-def build_relation_and_date_filtered_frame(
-    filtered_casenum_ade_date_frame: pl.DataFrame,
-) -> pl.DataFrame:
+def build_date_filtered_frame(frame: pl.DataFrame) -> pl.DataFrame:
     # I'll do almost any ridiculous thing
     # to appease type checkers
     date_filtered_frame = pl.concat(
@@ -359,7 +430,7 @@ def build_relation_and_date_filtered_frame(
                 sample_valid_dates,
                 map(
                     itemgetter(1),
-                    filtered_casenum_ade_date_frame.group_by(
+                    frame.group_by(
                         "casenum",
                         "TOXDESC",
                     ),
@@ -370,7 +441,13 @@ def build_relation_and_date_filtered_frame(
 
     print(f"After TOXDESC etc filtering - total instances {len(date_filtered_frame)}")
     print(date_filtered_frame["D_ATTN"].value_counts(normalize=True, sort=True))
-    relation_filtered_frame = relation_category_sampling(date_filtered_frame)
+    return date_filtered_frame
+
+
+def build_relation_filtered_frame(
+    frame: pl.DataFrame,
+) -> pl.DataFrame:
+    relation_filtered_frame = relation_category_sampling(frame)
     print("Exact adverse event counts (one per patient)")
     print(relation_filtered_frame["D_ATTN"].value_counts())
     print(f"After category resampling - total instances {len(relation_filtered_frame)}")
@@ -381,6 +458,8 @@ def build_relation_and_date_filtered_frame(
 def build_mrn_to_event_date_map(
     casenum_ade_date_table: str,
     casenum_dfci_mrn_table: str,
+    filter_to_single_date: bool,
+    stratify_relations: bool,
 ) -> Mapping[int, tuple[datetime.date, str]]:
     casenum_dfci_mrn_df = pl.read_csv(casenum_dfci_mrn_table)
     casenum_to_dfci_mrn_map = {
@@ -399,23 +478,17 @@ def build_mrn_to_event_date_map(
     casenum_filtered_frame = build_casenum_filtered_frame(
         casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
     )
-    with_valid_dates_frame = convert_and_filter_valid_dates(casenum_filtered_frame)
-    # relation_filtered_frame = build_relation_and_date_filtered_frame(with_valid_dates_frame)
-    # return {
-    #     get_mrn(case_number): (normalized_date, radiation_relation)
-    #     for case_number, normalized_date, radiation_relation in zip(
-    #         relation_filtered_frame["casenum"],
-    #         relation_filtered_frame["NORMALIZED_DATE"],
-    #         relation_filtered_frame["D_ATTN"],
-    #     )
-    # }
-
+    filtered_frame = convert_and_filter_valid_dates(casenum_filtered_frame)
+    if filter_to_single_date:
+        filtered_frame = build_date_filtered_frame(filtered_frame)
+    if stratify_relations:
+        filtered_frame = build_relation_filtered_frame(filtered_frame)
     return {
         get_mrn(case_number): (normalized_date, radiation_relation)
         for case_number, normalized_date, radiation_relation in zip(
-            with_valid_dates_frame["casenum"],
-            with_valid_dates_frame["NORMALIZED_DATE"],
-            with_valid_dates_frame["D_ATTN"],
+            filtered_frame["casenum"],
+            filtered_frame["NORMALIZED_DATE"],
+            filtered_frame["D_ATTN"],
         )
     }
 
@@ -425,11 +498,18 @@ def collect_notes_and_write_metrics(
     casenum_dfci_mrn_table: str,
     inpatient_json_path: str,
     outpatient_json_path: str,
+    filter_to_single_date: bool,
+    stratify_beginning: bool,
+    stratify_end: bool,
     output_dir: str,
 ) -> None:
+    if stratify_beginning and stratify_end:
+        raise ValueError("You can't stratify at both the beginning and the end")
     mrn_to_selected_date = build_mrn_to_event_date_map(
         casenum_ade_date_table,
         casenum_dfci_mrn_table,
+        filter_to_single_date=filter_to_single_date,
+        stratify_relations=stratify_beginning,
     )
 
     all_inpatient_notes = raw_json_parse(inpatient_json_path)
@@ -444,11 +524,13 @@ def collect_notes_and_write_metrics(
         note_type="inpatient",
         note_dicts=provider_type_filtered_inpatient_notes,
         mrn_to_earliest_date=mrn_to_selected_date,
+        stratify_end=stratify_end,
     )
     mrn_date_filtered_outpatient_notes = filter_valid_mrn_and_date_notes(
         note_type="outpatient",
         note_dicts=provider_type_filtered_outpatient_notes,
         mrn_to_earliest_date=mrn_to_selected_date,
+        stratify_end=stratify_end,
     )
     with open(os.path.join(output_dir, "filtered_inpatient.json"), mode="w") as f:
         json.dump(mrn_date_filtered_inpatient_notes, f)
@@ -466,6 +548,9 @@ def main():
         args.casenum_dfci_mrn_table,
         args.inpatient_json_path,
         args.outpatient_json_path,
+        args.filter_to_single_date,
+        args.stratify_beginning,
+        args.stratify_end,
         args.output_dir,
     )
 
