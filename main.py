@@ -255,10 +255,6 @@ def filter_outpatient_provider_types(
     return filtered
 
 
-def stratify(radiation_relation_labels: Sequence[str]) -> Sequence[int]:
-    return []
-
-
 def get_radiation_relation_label(
     note_json: note_dict,
     mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
