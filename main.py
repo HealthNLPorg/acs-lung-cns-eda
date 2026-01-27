@@ -447,11 +447,19 @@ def collect_notes_and_write_metrics(
         note_dicts=provider_type_filtered_outpatient_notes,
         mrn_to_earliest_dates=mrn_to_earliest_dates,
     )
-    with open(os.path.join(output_dir, "filtered_inpatient.json"), mode="w") as f:
-        json.dump(mrn_date_filtered_inpatient_notes, f)
 
-    with open(os.path.join(output_dir, "filtered_outpatient.json"), mode="w") as f:
-        json.dump(mrn_date_filtered_outpatient_notes, f)
+    def to_jsonl(note_json: note_dict) -> str:
+        return json.dumps(note_json) + "\n"
+
+    with open(
+        os.path.join(output_dir, "inpatient", "filtered_inpatient.jsonl"), mode="w"
+    ) as f:
+        f.writelines(map(to_jsonl, mrn_date_filtered_inpatient_notes))
+
+    with open(
+        os.path.join(output_dir, "outpatient", "filtered_outpatient.jsonl"), mode="w"
+    ) as f:
+        f.writelines(map(to_jsonl, mrn_date_filtered_outpatient_notes))
 
 
 def main():
