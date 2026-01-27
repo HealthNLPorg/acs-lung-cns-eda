@@ -413,7 +413,7 @@ def build_mrn_to_event_dates_map(
         filtered_frame["NORMALIZED_DATE"],
         filtered_frame["D_ATTN"],
     ):
-        result[case_number].add((normalized_date, radiation_relation))
+        result[get_mrn(case_number)].add((normalized_date, radiation_relation))
     return result
 
 
