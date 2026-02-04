@@ -1,3 +1,4 @@
+from itertools import chain
 import polars as pl
 from collections import namedtuple, defaultdict, Counter
 import os
@@ -101,7 +102,7 @@ def dates_within_range(
     )
 
 
-def totals(
+def print_totals(
     note_jsons: Iterable[note_dict], key: str, stage: str, first_n: int | None = 10
 ) -> None:
     totals_by_key = Counter(note_json.get(key) for note_json in note_jsons)
@@ -117,7 +118,10 @@ def totals(
     print(stage)
     print(
         tabulate(
-            totals_by_key.most_common()[: min(len(totals_by_key), first_n)],
+            chain(
+                totals_by_key.most_common()[: min(len(totals_by_key), first_n)],
+                [("...", "...")],
+            ),
             headers=[" ".join(key.split("_")).title(), "Total"],
         )
     )
@@ -137,7 +141,7 @@ def word_count_filter(
         note_json for note_json in note_jsons if has_minimum_total_words(note_json)
     ]
     logger.info(
-        f"Total {source} notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+        f"Total {source} notes before minimum of {minimum_total_words} words filtration: {len(note_jsons):,} - after: {len(filtered):,}"
     )
     return filtered
 
@@ -394,7 +398,16 @@ def collect_notes_and_write_metrics(
     )
 
     all_inpatient_notes = raw_json_parse(inpatient_json_path)
+    print_totals(
+        all_inpatient_notes,
+        key="PROVIDER_DEPARTMENT_STR",
+        # key="ENCOUNTER_TYPE_DESC",
+        stage="All inpatient",
+    )
     all_outpatient_notes = raw_json_parse(outpatient_json_path)
+    print_totals(
+        all_outpatient_notes, key="PROVIDER_DEPARTMENT_STR", stage="All outpatient"
+    )
     provider_type_filtered_inpatient_notes = filter_provider_types(
         all_inpatient_notes, source="in patient"
     )
