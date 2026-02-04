@@ -1,8 +1,9 @@
 import polars as pl
-from collections import namedtuple, defaultdict
+from collections import namedtuple, defaultdict, Counter
 import os
 import json
 import argparse
+from tabulate import tabulate
 from enum import Enum
 from functools import cache
 from collections.abc import Mapping, Sequence, Collection, Iterable
@@ -46,6 +47,8 @@ parser.add_argument(
     default=".",
     help="Directory for outputting table",
 )
+
+parser.add_argument("--filter_by_word_count", action="store_true")
 logger = logging.getLogger(__name__)
 
 logging.basicConfig(
@@ -98,8 +101,31 @@ def dates_within_range(
     )
 
 
+def totals(
+    note_jsons: Iterable[note_dict], key: str, stage: str, first_n: int | None = 10
+) -> None:
+    totals_by_key = Counter(note_json.get(key) for note_json in note_jsons)
+    if first_n is None:
+        print(stage)
+        print(
+            tabulate(
+                totals_by_key.most_common(),
+                headers=[" ".join(key.split("_")).title(), "Total"],
+            )
+        )
+        return
+    print(stage)
+    print(
+        tabulate(
+            totals_by_key.most_common()[: min(len(totals_by_key), first_n)],
+            headers=[" ".join(key.split("_")).title(), "Total"],
+        )
+    )
+
+
 def word_count_filter(
-    note_json_list: Collection[note_dict],
+    note_jsons: Collection[note_dict],
+    source: str,
     minimum_total_words: int = 500,
 ) -> Sequence[note_dict]:
     def has_minimum_total_words(
@@ -107,9 +133,13 @@ def word_count_filter(
     ) -> bool:
         return len(str(note_json.get("RPT_TEXT", "")).split()) >= mininum_total_words
 
-    return [
-        note_json for note_json in note_json_list if has_minimum_total_words(note_json)
+    filtered = [
+        note_json for note_json in note_jsons if has_minimum_total_words(note_json)
     ]
+    logger.info(
+        f"Total {source} notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+    )
+    return filtered
 
 
 def mkdir(dir_name: str) -> None:
@@ -153,7 +183,7 @@ def raw_json_parse(json_path: str) -> list[note_dict]:
 
 
 def filter_provider_types(
-    note_jsons: Collection[note_dict],
+    note_jsons: Collection[note_dict], source: str
 ) -> Sequence[note_dict]:
     inpatient_provider_types = {
         "Physician",
@@ -168,7 +198,7 @@ def filter_provider_types(
         if note_json.get("PROVIDER_TYPE") in inpatient_provider_types
     ]
     logger.info(
-        f"Total in patient notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+        f"Total {source} notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
     )
     return filtered
 
@@ -356,6 +386,7 @@ def collect_notes_and_write_metrics(
     inpatient_json_path: str,
     outpatient_json_path: str,
     output_dir: str,
+    filter_by_word_count: bool,
 ) -> None:
     mrn_to_earliest_dates = build_mrn_to_event_dates_map(
         casenum_ade_date_table,
@@ -364,10 +395,21 @@ def collect_notes_and_write_metrics(
 
     all_inpatient_notes = raw_json_parse(inpatient_json_path)
     all_outpatient_notes = raw_json_parse(outpatient_json_path)
-    provider_type_filtered_inpatient_notes = filter_provider_types(all_inpatient_notes)
-    provider_type_filtered_outpatient_notes = filter_provider_types(
-        all_outpatient_notes
+    provider_type_filtered_inpatient_notes = filter_provider_types(
+        all_inpatient_notes, source="in patient"
     )
+    provider_type_filtered_outpatient_notes = filter_provider_types(
+        all_outpatient_notes, source="out patient"
+    )
+    if filter_by_word_count:
+        provider_type_filtered_inpatient_notes = word_count_filter(
+            provider_type_filtered_inpatient_notes, source="in patient"
+        )
+
+        provider_type_filtered_outpatient_notes = word_count_filter(
+            provider_type_filtered_outpatient_notes, source="out patient"
+        )
+
     mrn_date_filtered_inpatient_notes = filter_valid_mrn_and_date_notes(
         note_type="inpatient",
         note_dicts=provider_type_filtered_inpatient_notes,
@@ -401,6 +443,7 @@ def main():
         args.inpatient_json_path,
         args.outpatient_json_path,
         args.output_dir,
+        args.filter_by_word_count,
     )
 
 
