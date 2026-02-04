@@ -4,8 +4,8 @@ import os
 import json
 import argparse
 from enum import Enum
-from functools import lru_cache
-from collections.abc import Mapping, Sequence, Collection
+from functools import cache
+from collections.abc import Mapping, Sequence, Collection, Iterable
 from operator import itemgetter, is_not_none
 from math import floor
 import datetime
@@ -53,7 +53,7 @@ logging.basicConfig(
     datefmt="%m/%d/%Y %H:%M:%S",
     level=logging.INFO,
 )
-note_dict = dict[str, str | int]
+note_dict = Mapping[str, str | int]
 
 
 SIX_WEEKS = datetime.timedelta(days=42)
@@ -75,13 +75,13 @@ def __normalize(s: str) -> str:
 
 # Keep it simple by avoiding time information for now
 # we can fold it back in if we need that degree of granularity
-@lru_cache
+@cache
 def parse_and_normalize_date(dt_str: str) -> datetime.date:
     parsed_dt = parse(dt_str, fuzzy=True)
     return parsed_dt.date()
 
 
-@lru_cache
+@cache
 def dates_within_range(
     pt_earliest: datetime.date,
     note_date: str | None,
@@ -98,12 +98,26 @@ def dates_within_range(
     )
 
 
+def word_count_filter(
+    note_json_list: Collection[note_dict],
+    minimum_total_words: int = 500,
+) -> Sequence[note_dict]:
+    def has_minimum_total_words(
+        note_json: note_dict, mininum_total_words: int = minimum_total_words
+    ) -> bool:
+        return len(str(note_json.get("RPT_TEXT", "")).split()) >= mininum_total_words
+
+    return [
+        note_json for note_json in note_json_list if has_minimum_total_words(note_json)
+    ]
+
+
 def mkdir(dir_name: str) -> None:
     _dir_name = pathlib.Path(dir_name)
     _dir_name.mkdir(parents=True, exist_ok=True)
 
 
-def save_jsonl(output_dir: str, fn: str, note_json_list: list[dict]) -> None:
+def save_jsonl(output_dir: str, fn: str, note_json_list: Iterable[dict]) -> None:
     mkdir(output_dir)
 
     # Honestly can't believe Python doesn't implement this part
@@ -138,20 +152,7 @@ def raw_json_parse(json_path: str) -> list[note_dict]:
         return json.load(f)["response"]["docs"]
 
 
-# etg@DIMJ0JW5Y9T3G cns_eda_workspace % rg "PROVIDER_TYPE\"" Inpatient\ Progress.json | sort | uniq -c
-#   12         "PROVIDER_TYPE":"Anesthesiologist",
-#   10         "PROVIDER_TYPE":"Dentist",
-#    2         "PROVIDER_TYPE":"Fellow",
-#    1         "PROVIDER_TYPE":"Licensed Nurse",
-#   27         "PROVIDER_TYPE":"Nurse Practitioner",
-#    1         "PROVIDER_TYPE":"Occupational Therapist",
-#    3         "PROVIDER_TYPE":"Physical Therapist",
-#  137         "PROVIDER_TYPE":"Physician Assistant",
-# 2501         "PROVIDER_TYPE":"Physician",
-#   30         "PROVIDER_TYPE":"Registered Nurse",
-#  588         "PROVIDER_TYPE":"Resource",
-#    1         "PROVIDER_TYPE":"Speech-Language Pathologist",
-def filter_inpatient_provider_types(
+def filter_provider_types(
     note_jsons: Collection[note_dict],
 ) -> Sequence[note_dict]:
     inpatient_provider_types = {
@@ -159,13 +160,7 @@ def filter_inpatient_provider_types(
         "Physician Assistant",
         "Nurse Practitioner",
         "Fellow",
-        # These were from Danielle but
-        # rg "PROVIDER_TYPE\"" Inpatient\ Progress.json | sort | uniq -c
-        # didn't turn any of these up
-        # if we want to use any other types they're listed above
         "Resident",
-        "Intern",
-        "Attending",
     }
     filtered = [
         note_json
@@ -174,68 +169,6 @@ def filter_inpatient_provider_types(
     ]
     logger.info(
         f"Total in patient notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
-    )
-    return filtered
-
-
-# etg@DIMJ0JW5Y9T3G cns_eda_workspace % rg "PROVIDER_TYPE\"" Outpatient\ Progress.json | sort | uniq -c
-#  105         "PROVIDER_TYPE":"Acupuncturist",
-#    7         "PROVIDER_TYPE":"Ancillary",
-#   91         "PROVIDER_TYPE":"Anesthesiologist",
-#   14         "PROVIDER_TYPE":"Audiologist",
-#    3         "PROVIDER_TYPE":"Case Manager",
-#    4         "PROVIDER_TYPE":"Community Health Worker",
-#   49         "PROVIDER_TYPE":"Coordinator",
-#    6         "PROVIDER_TYPE":"Counselor",
-#   14         "PROVIDER_TYPE":"Dentist",
-#    1         "PROVIDER_TYPE":"Embryologist",
-#   20         "PROVIDER_TYPE":"Fellow",
-#  279         "PROVIDER_TYPE":"Generic Provider",
-#   24         "PROVIDER_TYPE":"Genetic Counselor",
-#  147         "PROVIDER_TYPE":"Licensed Dietitian/Nutritionist",
-#    9         "PROVIDER_TYPE":"Licensed Nurse",
-#   10         "PROVIDER_TYPE":"Medical Assistant",
-# 2882         "PROVIDER_TYPE":"Nurse Practitioner",
-#  104         "PROVIDER_TYPE":"Occupational Therapist",
-#    2         "PROVIDER_TYPE":"Patient Care/Nursing Assistant",
-#   18         "PROVIDER_TYPE":"Pharmacist",
-#    2         "PROVIDER_TYPE":"Physical Therapist Assistant",
-#  317         "PROVIDER_TYPE":"Physical Therapist",
-#  825         "PROVIDER_TYPE":"Physician Assistant",
-# 8184         "PROVIDER_TYPE":"Physician",
-#   13         "PROVIDER_TYPE":"Podiatrist",
-#   14         "PROVIDER_TYPE":"Psychologist",
-#   63         "PROVIDER_TYPE":"Registered Dietitian",
-# 5762         "PROVIDER_TYPE":"Registered Nurse",
-#    3         "PROVIDER_TYPE":"Resident",
-#  161         "PROVIDER_TYPE":"Resource",
-#    4         "PROVIDER_TYPE":"Respiratory Therapist",
-#  952         "PROVIDER_TYPE":"Social Worker",
-#  105         "PROVIDER_TYPE":"Speech-Language Pathologist",
-#    2         "PROVIDER_TYPE":"Spiritual Care Student",
-#   20         "PROVIDER_TYPE":"Spiritual Care",
-#    4         "PROVIDER_TYPE":"Technologist",
-#   21         "PROVIDER_TYPE":"Therapist",
-def filter_outpatient_provider_types(
-    note_jsons: Collection[note_dict],
-) -> Sequence[note_dict]:
-    # Same as inpatient except for "Attending" and "Intern"
-    # unlike with inpatient everything is accounted for
-    outpatient_provider_types = {
-        "Physician",
-        "Physician Assistant",
-        "Nurse Practitioner",
-        "Fellow",
-        "Resident",
-    }
-    filtered = [
-        note_json
-        for note_json in note_jsons
-        if note_json.get("PROVIDER_TYPE") in outpatient_provider_types
-    ]
-
-    logger.info(
-        f"Total out patient notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
     )
     return filtered
 
@@ -270,7 +203,7 @@ def filter_valid_mrn_and_date_notes(
     return filtered
 
 
-@lru_cache
+@cache
 def convert_valid_date(possible_date: str) -> datetime.date | None:
     all_components = possible_date.split("/")
     if len(all_components) != 3:
@@ -431,10 +364,8 @@ def collect_notes_and_write_metrics(
 
     all_inpatient_notes = raw_json_parse(inpatient_json_path)
     all_outpatient_notes = raw_json_parse(outpatient_json_path)
-    provider_type_filtered_inpatient_notes = filter_inpatient_provider_types(
-        all_inpatient_notes
-    )
-    provider_type_filtered_outpatient_notes = filter_outpatient_provider_types(
+    provider_type_filtered_inpatient_notes = filter_provider_types(all_inpatient_notes)
+    provider_type_filtered_outpatient_notes = filter_provider_types(
         all_outpatient_notes
     )
     mrn_date_filtered_inpatient_notes = filter_valid_mrn_and_date_notes(
