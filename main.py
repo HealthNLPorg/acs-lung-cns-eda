@@ -103,28 +103,38 @@ def dates_within_range(
 
 
 def print_totals(
-    note_jsons: Iterable[note_dict], key: str, stage: str, first_n: int | None = 10
+    note_jsons: Iterable[note_dict],
+    key: str,
+    stage: str,
+    first_n: int | None = 10,
+    out_path: str | None = None,
 ) -> None:
     totals_by_key = Counter(note_json.get(key) for note_json in note_jsons)
-    if first_n is None:
+    if out_path is None:
+        if first_n is None:
+            print(stage)
+            print(
+                tabulate(
+                    totals_by_key.most_common(),
+                    headers=[" ".join(key.split("_")).title(), "Total"],
+                )
+            )
+            return
         print(stage)
         print(
             tabulate(
-                totals_by_key.most_common(),
+                chain(
+                    totals_by_key.most_common()[: min(len(totals_by_key), first_n)],
+                    [("...", "...")],
+                ),
                 headers=[" ".join(key.split("_")).title(), "Total"],
             )
         )
-        return
-    print(stage)
-    print(
-        tabulate(
-            chain(
-                totals_by_key.most_common()[: min(len(totals_by_key), first_n)],
-                [("...", "...")],
-            ),
-            headers=[" ".join(key.split("_")).title(), "Total"],
-        )
-    )
+    else:
+        pl.DataFrame(
+            schema=[(key, pl.String), ("Total", pl.Int64)],
+            data=totals_by_key.most_common(),
+        ).write_csv(out_path)
 
 
 def word_count_filter(
@@ -411,8 +421,23 @@ def collect_notes_and_write_metrics(
     provider_type_filtered_inpatient_notes = filter_provider_types(
         all_inpatient_notes, source="in patient"
     )
+    print_totals(
+        provider_type_filtered_inpatient_notes,
+        key="PROVIDER_DEPARTMENT_STR",
+        stage="Provider type filtered inpatient",
+        first_n=None,
+        out_path="./provider_type_filtered_inpatient.csv",
+    )
     provider_type_filtered_outpatient_notes = filter_provider_types(
         all_outpatient_notes, source="out patient"
+    )
+
+    print_totals(
+        provider_type_filtered_outpatient_notes,
+        key="PROVIDER_DEPARTMENT_STR",
+        stage="Provider type filtered outpatient",
+        first_n=None,
+        out_path="./provider_type_filtered_outpatient.csv",
     )
     if filter_by_word_count:
         provider_type_filtered_inpatient_notes = word_count_filter(
