@@ -228,7 +228,7 @@ def filter_provider_departments(
         if note_json.get("PROVIDER_DEPARTMENT_STR") in relevant_provider_departments
     ]
     logger.info(
-        f"Total {source} notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+        f"Total {source} notes before provider departments filtration: {len(note_jsons):,} - after: {len(filtered):,}"
     )
     return filtered
 
