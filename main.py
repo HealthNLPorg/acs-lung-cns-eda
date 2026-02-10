@@ -43,6 +43,17 @@ parser.add_argument(
     help="Out patient JSON",
 )
 parser.add_argument(
+    "--inpatient_provider_departments_path",
+    type=str,
+    help="In patient PROVIDER_DEPARTMENTS",
+)
+
+parser.add_argument(
+    "--outpatient_provider_departments_path",
+    type=str,
+    help="Out patient PROVIDER_DEPARTMENTS",
+)
+parser.add_argument(
     "--output_dir",
     type=str,
     default=".",
@@ -100,6 +111,16 @@ def dates_within_range(
         >= (parse_and_normalize_date(note_date) - pt_earliest)
         >= lower_bound
     )
+
+
+def table_to_provider_departments(table_path: str) -> Collection[str]:
+    df = pl.read_csv(table_path)
+    return {
+        provider_department
+        for provider_department in df.filter(pl.col("retain") == 1)
+        .select("PROVIDER_DEPARTMENT_STR")
+        .to_series()
+    }
 
 
 def print_totals(
@@ -194,6 +215,22 @@ def has_valid_mrn_and_date(
 def raw_json_parse(json_path: str) -> list[note_dict]:
     with open(json_path) as f:
         return json.load(f)["response"]["docs"]
+
+
+def filter_provider_departments(
+    note_jsons: Collection[note_dict],
+    relevant_provider_departments: Collection[str],
+    source: str,
+) -> Sequence[note_dict]:
+    filtered = [
+        note_json
+        for note_json in note_jsons
+        if note_json.get("PROVIDER_DEPARTMENT_STR") in relevant_provider_departments
+    ]
+    logger.info(
+        f"Total {source} notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+    )
+    return filtered
 
 
 def filter_provider_types(
@@ -399,21 +436,24 @@ def collect_notes_and_write_metrics(
     casenum_dfci_mrn_table: str,
     inpatient_json_path: str,
     outpatient_json_path: str,
+    inpatient_provider_departments_path: str,
+    outpatient_provider_departments_path: str,
     output_dir: str,
     filter_by_word_count: bool,
 ) -> None:
+    inpatient_provider_departments = table_to_provider_departments(
+        inpatient_provider_departments_path
+    )
+    outpatient_provider_departments = table_to_provider_departments(
+        outpatient_provider_departments_path
+    )
+
     mrn_to_earliest_dates = build_mrn_to_event_dates_map(
         casenum_ade_date_table,
         casenum_dfci_mrn_table,
     )
 
     all_inpatient_notes = raw_json_parse(inpatient_json_path)
-    print_totals(
-        all_inpatient_notes,
-        key="PROVIDER_DEPARTMENT_STR",
-        # key="ENCOUNTER_TYPE_DESC",
-        stage="All inpatient",
-    )
     all_outpatient_notes = raw_json_parse(outpatient_json_path)
     print_totals(
         all_outpatient_notes, key="PROVIDER_DEPARTMENT_STR", stage="All outpatient"
@@ -421,41 +461,38 @@ def collect_notes_and_write_metrics(
     provider_type_filtered_inpatient_notes = filter_provider_types(
         all_inpatient_notes, source="in patient"
     )
-    print_totals(
-        provider_type_filtered_inpatient_notes,
-        key="PROVIDER_DEPARTMENT_STR",
-        stage="Provider type filtered inpatient",
-        first_n=None,
-        out_path="./provider_type_filtered_inpatient.csv",
-    )
     provider_type_filtered_outpatient_notes = filter_provider_types(
         all_outpatient_notes, source="out patient"
     )
 
-    print_totals(
-        provider_type_filtered_outpatient_notes,
-        key="PROVIDER_DEPARTMENT_STR",
-        stage="Provider type filtered outpatient",
-        first_n=None,
-        out_path="./provider_type_filtered_outpatient.csv",
+    provider_department_filtered_inpatient_notes = filter_provider_departments(
+        provider_type_filtered_inpatient_notes,
+        source="in patient",
+        relevant_provider_departments=inpatient_provider_departments,
     )
+    provider_department_filtered_outpatient_notes = filter_provider_departments(
+        provider_type_filtered_outpatient_notes,
+        source="out patient",
+        relevant_provider_departments=outpatient_provider_departments,
+    )
+
     if filter_by_word_count:
-        provider_type_filtered_inpatient_notes = word_count_filter(
-            provider_type_filtered_inpatient_notes, source="in patient"
+        provider_department_filtered_inpatient_notes = word_count_filter(
+            provider_department_filtered_inpatient_notes, source="in patient"
         )
 
-        provider_type_filtered_outpatient_notes = word_count_filter(
-            provider_type_filtered_outpatient_notes, source="out patient"
+        provider_department_filtered_outpatient_notes = word_count_filter(
+            provider_department_filtered_outpatient_notes, source="out patient"
         )
 
     mrn_date_filtered_inpatient_notes = filter_valid_mrn_and_date_notes(
         note_type="inpatient",
-        note_dicts=provider_type_filtered_inpatient_notes,
+        note_dicts=provider_department_filtered_inpatient_notes,
         mrn_to_earliest_dates=mrn_to_earliest_dates,
     )
     mrn_date_filtered_outpatient_notes = filter_valid_mrn_and_date_notes(
         note_type="outpatient",
-        note_dicts=provider_type_filtered_outpatient_notes,
+        note_dicts=provider_department_filtered_outpatient_notes,
         mrn_to_earliest_dates=mrn_to_earliest_dates,
     )
 
@@ -480,6 +517,8 @@ def main():
         args.casenum_dfci_mrn_table,
         args.inpatient_json_path,
         args.outpatient_json_path,
+        args.inpatient_provider_departments_path,
+        args.outpatient_provider_departments_path,
         args.output_dir,
         args.filter_by_word_count,
     )
