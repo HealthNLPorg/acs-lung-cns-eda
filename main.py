@@ -1,10 +1,12 @@
 from itertools import chain
+import random
 import polars as pl
 from collections import namedtuple, defaultdict, Counter
 import os
 import json
 import argparse
 from tabulate import tabulate
+from more_itertools import one
 from enum import Enum
 from functools import cache
 from collections.abc import Mapping, Sequence, Collection, Iterable
@@ -271,32 +273,103 @@ def filter_provider_types(
 
 def get_radiation_relation_label(
     note_json: note_dict,
-    mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
+    mrn_to_earliest_dates: Mapping[int, Collection[tuple[datetime.date, str]]],
 ) -> str:
     # since has.. is the filter predicate we don't
     # have to worry if the MRN isn't in the table
     mrn_key = "DFCI_MRN"
     mrn = int(note_json[mrn_key])
-    _, radiation_relation = mrn_to_earliest_date[mrn]
-    return radiation_relation
+    try:
+        _, radiation_relation = one(
+            mrn_to_earliest_dates[mrn], too_long=ValueError, too_short=IndexError
+        )
+        return radiation_relation
+    except IndexError:
+        raise ValueError(f"Missing date and radiation relation for {mrn}")
+    except ValueError:
+        raise ValueError(
+            f"{len(mrn_to_earliest_dates[mrn])} date/radiation relation pairs for {mrn}, need to filter to single date before this point"
+        )
+
+
+# def filter_valid_mrn_and_date_notes(
+#     note_type: str,
+#     note_dicts: Collection[note_dict],
+#     mrn_to_earliest_dates: Mapping[int, Collection[tuple[datetime.date, str]]],
+# ) -> Sequence[note_dict]:
+#     filtered = [
+#         note_json
+#         for note_json in note_dicts
+#         if has_valid_mrn_and_date(
+#             mrn_to_earliest_dates=mrn_to_earliest_dates, note_json=note_json
+#         )
+#     ]
+#     logger.info(
+#         f"Total {note_type} notes before MRN and date filtration: {len(note_dicts):,} - after: {len(filtered):,}"
+#     )
+#     return filtered
+
+
+def collection_relation_category_sampling(
+    notes: Collection[tuple[note_dict, str]],
+    relation_category: str = "No Relation",
+    target_ratio: float = 0.25,
+    sample_seed: int | None = SAMPLE_SEED,
+) -> Sequence[note_dict]:
+    others = [
+        note
+        for note, radiation_relation in notes
+        if radiation_relation != relation_category
+    ]
+    remainder = 1.0 - target_ratio
+    target_total = floor((1.0 / remainder) * len(others))
+    relation_target = target_total - len(others)
+    return list(
+        chain(
+            others,
+            random.choices(
+                [
+                    note
+                    for note, radiation_relation in notes
+                    if radiation_relation == relation_category
+                ],
+                k=relation_target,
+            ),
+        )
+    )
+
+
+def stratification(
+    notes: Collection[tuple[note_dict, str]], stratify_end: bool
+) -> Sequence[note_dict]:
+    if not stratify_end:
+        return list(map(itemgetter(0), notes))
+    return collection_relation_category_sampling(notes)
 
 
 def filter_valid_mrn_and_date_notes(
     note_type: str,
     note_dicts: Collection[note_dict],
     mrn_to_earliest_dates: Mapping[int, Collection[tuple[datetime.date, str]]],
+    stratify_end: bool,
 ) -> Sequence[note_dict]:
     filtered = [
-        note_json
+        (
+            note_json,
+            get_radiation_relation_label(
+                note_json=note_json, mrn_to_earliest_dates=mrn_to_earliest_dates
+            ),
+        )
         for note_json in note_dicts
         if has_valid_mrn_and_date(
             mrn_to_earliest_dates=mrn_to_earliest_dates, note_json=note_json
         )
     ]
+    result = stratification(notes=filtered, stratify_end=stratify_end)
     logger.info(
-        f"Total {note_type} notes before MRN and date filtration: {len(note_dicts):,} - after: {len(filtered):,}"
+        f"Total {note_type} notes before MRN and date filtration: {len(note_dicts):,} - after: {len(result):,}"
     )
-    return filtered
+    return result
 
 
 @cache
@@ -528,11 +601,13 @@ def collect_notes_and_write_metrics(
         note_type="inpatient",
         note_dicts=provider_department_filtered_inpatient_notes,
         mrn_to_earliest_dates=mrn_to_earliest_dates,
+        stratify_end=stratify_end,
     )
     mrn_date_filtered_outpatient_notes = filter_valid_mrn_and_date_notes(
         note_type="outpatient",
         note_dicts=provider_department_filtered_outpatient_notes,
         mrn_to_earliest_dates=mrn_to_earliest_dates,
+        stratify_end=stratify_end,
     )
 
     def to_jsonl(note_json: note_dict) -> str:
