@@ -1,12 +1,11 @@
 import random
 from itertools import chain
 import polars as pl
-from collections import namedtuple
 import os
 import json
 import argparse
 from enum import Enum
-from functools import lru_cache
+from functools import cache
 from collections.abc import Mapping, Sequence, Collection
 from operator import itemgetter, is_not_none
 from math import floor
@@ -83,22 +82,19 @@ class MRNSpace(Enum):
     MGH = "MGH"
 
 
-InterSiteMRNTuple = namedtuple("InterSiteMRNTuple", [space.value for space in MRNSpace])
-
-
 def __normalize(s: str) -> str:
     return " ".join(s.strip().lower().split())
 
 
 # Keep it simple by avoiding time information for now
 # we can fold it back in if we need that degree of granularity
-@lru_cache
+@cache
 def parse_and_normalize_date(dt_str: str) -> datetime.date:
     parsed_dt = parse(dt_str, fuzzy=True)
     return parsed_dt.date()
 
 
-@lru_cache
+@cache
 def dates_within_range(
     pt_earliest: datetime.date,
     note_date: str | None,
@@ -329,7 +325,7 @@ def filter_valid_mrn_and_date_notes(
     return result
 
 
-@lru_cache
+@cache
 def convert_valid_date(possible_date: str) -> datetime.date | None:
     all_components = possible_date.split("/")
     if len(all_components) != 3:
@@ -370,7 +366,7 @@ def convert_and_filter_valid_dates(
 def sample_valid_dates(
     casenum_toxdesc_with_valid_dates_subframe: pl.DataFrame,
     sample_size: int = 1,
-    sample_seed: int | None = SAMPLE_SEED,
+    sample_seed: int = SAMPLE_SEED,
 ) -> pl.DataFrame | None:
     if len(casenum_toxdesc_with_valid_dates_subframe) < sample_size:
         return None
@@ -447,6 +443,7 @@ def build_date_filtered_frame(frame: pl.DataFrame) -> pl.DataFrame:
 def build_relation_filtered_frame(
     frame: pl.DataFrame,
 ) -> pl.DataFrame:
+    print(f"Before category resampling - total instances {len(frame)}")
     relation_filtered_frame = relation_category_sampling(frame)
     print("Exact adverse event counts (one per patient)")
     print(relation_filtered_frame["D_ATTN"].value_counts())
@@ -555,6 +552,5 @@ def main():
     )
 
 
-# RPT_TEXT
 if __name__ == "__main__":
     main()
