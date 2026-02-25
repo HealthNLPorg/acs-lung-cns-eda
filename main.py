@@ -60,6 +60,21 @@ parser.add_argument(
     help="Directory for outputting table",
 )
 
+parser.add_argument(
+    "--filter_to_single_date",
+    action="store_true",
+    help="Starting at the beginning",
+)
+parser.add_argument(
+    "--stratify_beginning",
+    action="store_true",
+    help="Starting at the beginning",
+)
+parser.add_argument(
+    "--stratify_end",
+    action="store_true",
+    help="Starting at the beginning",
+)
 parser.add_argument("--filter_by_word_count", action="store_true")
 logger = logging.getLogger(__name__)
 
@@ -399,9 +414,23 @@ def build_date_filtered_frame(frame: pl.DataFrame) -> pl.DataFrame:
     return date_filtered_frame
 
 
+def build_relation_filtered_frame(
+    frame: pl.DataFrame,
+) -> pl.DataFrame:
+    print(f"Before category resampling - total instances {len(frame)}")
+    relation_filtered_frame = relation_category_sampling(frame)
+    print("Exact adverse event counts (one per patient)")
+    print(relation_filtered_frame["D_ATTN"].value_counts())
+    print(f"After category resampling - total instances {len(relation_filtered_frame)}")
+    print(relation_filtered_frame["D_ATTN"].value_counts(normalize=True, sort=True))
+    return relation_filtered_frame
+
+
 def build_mrn_to_event_dates_map(
     casenum_ade_date_table: str,
     casenum_dfci_mrn_table: str,
+    filter_to_single_date: bool,
+    stratify_relations: bool,
 ) -> Mapping[int, Collection[tuple[datetime.date, str]]]:
     result = defaultdict(set)
     casenum_dfci_mrn_df = pl.read_csv(casenum_dfci_mrn_table)
@@ -422,6 +451,11 @@ def build_mrn_to_event_dates_map(
         casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
     )
     filtered_frame = convert_and_filter_valid_dates(casenum_filtered_frame)
+
+    if filter_to_single_date:
+        filtered_frame = build_date_filtered_frame(filtered_frame)
+    if stratify_relations:
+        filtered_frame = build_relation_filtered_frame(filtered_frame)
     for case_number, normalized_date, radiation_relation in zip(
         filtered_frame["casenum"],
         filtered_frame["NORMALIZED_DATE"],
@@ -438,6 +472,9 @@ def collect_notes_and_write_metrics(
     outpatient_json_path: str,
     inpatient_provider_departments_path: str,
     outpatient_provider_departments_path: str,
+    filter_to_single_date: bool,
+    stratify_beginning: bool,
+    stratify_end: bool,
     output_dir: str,
     filter_by_word_count: bool,
 ) -> None:
@@ -451,6 +488,8 @@ def collect_notes_and_write_metrics(
     mrn_to_earliest_dates = build_mrn_to_event_dates_map(
         casenum_ade_date_table,
         casenum_dfci_mrn_table,
+        filter_to_single_date=filter_to_single_date,
+        stratify_relations=stratify_beginning,
     )
 
     all_inpatient_notes = raw_json_parse(inpatient_json_path)
@@ -519,6 +558,9 @@ def main():
         args.outpatient_json_path,
         args.inpatient_provider_departments_path,
         args.outpatient_provider_departments_path,
+        args.filter_to_single_date,
+        args.stratify_beginning,
+        args.stratify_end,
         args.output_dir,
         args.filter_by_word_count,
     )
