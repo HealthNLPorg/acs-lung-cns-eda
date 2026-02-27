@@ -88,8 +88,8 @@ logging.basicConfig(
 note_dict = Mapping[str, str | int]
 
 
-SIX_WEEKS = datetime.timedelta(days=42)
-SAME_DAY = datetime.timedelta(days=0)
+SIX_WEEKS_AFTER = datetime.timedelta(days=42)
+TWO_WEEKS_BEFORE = datetime.timedelta(days=-14)
 
 
 class MRNSpace(Enum):
@@ -117,8 +117,8 @@ def parse_and_normalize_date(dt_str: str) -> datetime.date:
 def dates_within_range(
     pt_earliest: datetime.date,
     note_date: str | None,
-    upper_bound: datetime.timedelta = SIX_WEEKS,
-    lower_bound: datetime.timedelta = SAME_DAY,
+    upper_bound: datetime.timedelta = SIX_WEEKS_AFTER,
+    lower_bound: datetime.timedelta = TWO_WEEKS_BEFORE,
 ) -> bool:
     if note_date is None:
         # If we don't know then rule it out
@@ -442,9 +442,9 @@ def relation_category_sampling(
     )
 
 
-def build_casenum_filtered_frame(
-    valid_casenums: Collection[int],
+def build_mrn_filtered_frame(
     casenum_ade_date_table: str,
+    casenum_to_mrn: Mapping[int, int],
 ) -> pl.DataFrame:
     # First try grouping by toxdesc, selecting by date, then doing fractional sampling
     # by d_attn
@@ -453,14 +453,12 @@ def build_casenum_filtered_frame(
     )
     print(f"Before casenum filtering - total instances {len(casenum_ade_date_frame)}")
     print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
-    casenum_ade_date_frame = casenum_ade_date_frame.filter(
-        pl.col("casenum").is_in(valid_casenums)
-    )
-    print(
-        f"After valid DFCI MRN filtering - total instances {len(casenum_ade_date_frame)}"
-    )
-    print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
-    return casenum_ade_date_frame
+    mrn_ade_date_frame = casenum_ade_date_frame.filter(
+        pl.col("casenum").is_in(casenum_to_mrn.keys())
+    ).with_columns(pl.col("casenum").replace_strict(casenum_to_mrn).alias("MRN"))
+    print(f"After valid DFCI MRN filtering - total instances {len(mrn_ade_date_frame)}")
+    print(mrn_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
+    return mrn_ade_date_frame
 
 
 def build_date_filtered_frame(frame: pl.DataFrame) -> pl.DataFrame:
@@ -482,7 +480,7 @@ def build_date_filtered_frame(frame: pl.DataFrame) -> pl.DataFrame:
         )
     )
 
-    print(f"After TOXDESC etc filtering - total instances {len(date_filtered_frame)}")
+    print(f"After date filtering - total instances {len(date_filtered_frame)}")
     print(date_filtered_frame["D_ATTN"].value_counts(normalize=True, sort=True))
     return date_filtered_frame
 
@@ -514,27 +512,33 @@ def build_mrn_to_event_dates_map(
         )
     }
 
-    def get_mrn(case_number: int) -> int:
-        mrn = casenum_to_dfci_mrn_map.get(case_number)
-        if mrn is None:
-            raise ValueError(f"No MRN for {case_number} even after filtering")
-        return mrn
-
-    casenum_filtered_frame = build_casenum_filtered_frame(
-        casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
+    mrn_filtered_frame = build_mrn_filtered_frame(
+        casenum_ade_date_table=casenum_ade_date_table,
+        casenum_to_mrn=casenum_to_dfci_mrn_map,
     )
-    filtered_frame = convert_and_filter_valid_dates(casenum_filtered_frame)
+    filtered_frame = convert_and_filter_valid_dates(mrn_filtered_frame)
 
     if filter_to_single_date:
         filtered_frame = build_date_filtered_frame(filtered_frame)
     if stratify_relations:
         filtered_frame = build_relation_filtered_frame(filtered_frame)
-    for case_number, normalized_date, radiation_relation in zip(
-        filtered_frame["casenum"],
+    for mrn, normalized_date, radiation_relation in zip(
+        filtered_frame["MRN"],
         filtered_frame["NORMALIZED_DATE"],
         filtered_frame["D_ATTN"],
     ):
-        result[get_mrn(case_number)].add((normalized_date, radiation_relation))
+        if mrn not in result:
+            result[mrn].add((normalized_date, radiation_relation))
+    # if stratify_relations and filter_to_single_date:
+    #     exit_early = False
+    #     for k, v in result.items():
+    #         if len(v) > 1:
+    #             logger.error(f"WHATS HAPPENING {k} {v}")
+    #             exit_early = True
+    #     if exit_early:
+    #         print(filter_to_single_date)
+    #         print(stratify_relations)
+    #         exit(1)
     return result
 
 
