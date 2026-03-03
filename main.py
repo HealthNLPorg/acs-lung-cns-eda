@@ -666,22 +666,37 @@ def collect_notes_and_write_metrics(
     def valid_note(note: note_dict) -> bool:
         return get_report_id(note) in target_report_ids
 
-    with open(os.path.join(output_dir, "all.json"), mode="w") as f:
+    corrected_notes = [
+        correct_note_text(note)
+        for note in chain(
+            mrn_date_filtered_inpatient_notes,
+            mrn_date_filtered_outpatient_notes,
+        )
+        if valid_note(note)
+    ]
+    with open(os.path.join(output_dir, "all.json"), mode="w", encoding="utf-8") as f:
         f.writelines(
             map(
                 to_jsonl,
-                map(
-                    correct_note_text,
-                    filter(
-                        valid_note,
-                        chain(
-                            mrn_date_filtered_inpatient_notes,
-                            mrn_date_filtered_outpatient_notes,
-                        ),
-                    ),
-                ),
+                corrected_notes,
             )
         )
+    for corrected_note in corrected_notes:
+        with open(
+            os.path.join(
+                output_dir,
+                "ctakes_ready",
+                f"{get_report_id(corrected_note)}.txt",
+            ),
+            mode="w",
+            encoding="utf-8",
+        ) as f:
+            corrected_text = corrected_note.get("RPT_TEXT")
+            if corrected_text is None or not isinstance(corrected_text, str):
+                raise ValueError(
+                    f"Missing corrected text for {get_report_id(corrected_note)}"
+                )
+            f.write(corrected_text)
 
 
 def main():
