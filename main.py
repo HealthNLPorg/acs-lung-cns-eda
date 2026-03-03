@@ -1,13 +1,14 @@
 from itertools import chain
 import random
 import polars as pl
-from collections import namedtuple, defaultdict, Counter
+from collections import defaultdict, Counter
 import os
 import json
 import argparse
+import string
+import unicodedata
 from tabulate import tabulate
-from more_itertools import one
-from enum import Enum
+from more_itertools import one, all_unique
 from functools import cache
 from collections.abc import Mapping, Sequence, Collection, Iterable
 from operator import itemgetter, is_not_none
@@ -77,6 +78,12 @@ parser.add_argument(
     action="store_true",
     help="Starting at the beginning",
 )
+parser.add_argument(
+    "--sample_size",
+    type=int,
+    default=500,
+    help="Out patient PROVIDER_DEPARTMENTS",
+)
 parser.add_argument("--filter_by_word_count", action="store_true")
 logger = logging.getLogger(__name__)
 
@@ -92,13 +99,28 @@ SIX_WEEKS_AFTER = datetime.timedelta(days=42)
 TWO_WEEKS_BEFORE = datetime.timedelta(days=-14)
 
 
-class MRNSpace(Enum):
-    DFCI = "DFCI"
-    EMPI = "EMPI"
-    MGH = "MGH"
+@cache
+def relevant_unicode_category(category: str) -> bool:
+    return category != "So" and not category.startswith("C")
 
 
-InterSiteMRNTuple = namedtuple("InterSiteMRNTuple", [space.value for space in MRNSpace])
+@cache
+def relevant_character(char: str) -> bool:
+    if char in string.printable:
+        return True
+    category = unicodedata.category(char)
+    return relevant_unicode_category(category)
+
+
+def correct_note_text(note: note_dict, text_key: str = "RPT_TEXT") -> note_dict:
+    raw = note.get(text_key)
+    if raw is None or not isinstance(raw, str):
+        raise ValueError(f"Missing note text for {text_key} and {note['DFCI_MRN']}")
+    cleaned = "".join(filter(relevant_character, raw))
+    if cleaned != raw:
+        # logger.warning("Problematic source for note: %s", note["DFCI_MRN"])
+        return {k: v if k != text_key else cleaned for k, v in note.items()}
+    return note
 
 
 def __normalize(s: str) -> str:
@@ -292,24 +314,6 @@ def get_radiation_relation_label(
         )
 
 
-# def filter_valid_mrn_and_date_notes(
-#     note_type: str,
-#     note_dicts: Collection[note_dict],
-#     mrn_to_earliest_dates: Mapping[int, Collection[tuple[datetime.date, str]]],
-# ) -> Sequence[note_dict]:
-#     filtered = [
-#         note_json
-#         for note_json in note_dicts
-#         if has_valid_mrn_and_date(
-#             mrn_to_earliest_dates=mrn_to_earliest_dates, note_json=note_json
-#         )
-#     ]
-#     logger.info(
-#         f"Total {note_type} notes before MRN and date filtration: {len(note_dicts):,} - after: {len(filtered):,}"
-#     )
-#     return filtered
-
-
 def collection_relation_category_sampling(
     notes: Collection[tuple[note_dict, str]],
     relation_category: str = "No Relation",
@@ -327,7 +331,7 @@ def collection_relation_category_sampling(
     return list(
         chain(
             others,
-            random.choices(
+            random.sample(
                 [
                     note
                     for note, radiation_relation in notes
@@ -554,6 +558,7 @@ def collect_notes_and_write_metrics(
     stratify_end: bool,
     output_dir: str,
     filter_by_word_count: bool,
+    sample_size: int,
 ) -> None:
     inpatient_provider_departments = table_to_provider_departments(
         inpatient_provider_departments_path
@@ -614,18 +619,69 @@ def collect_notes_and_write_metrics(
         stratify_end=stratify_end,
     )
 
+    def get_report_id(note: note_dict) -> int:
+        report_id = note.get("RPT_ID")
+        if report_id is None:
+            raise ValueError(f"Note with MRN {note['DFCI_MRN']} missing report ID")
+        return int(report_id)
+
+    inpatient_record_ids = [
+        get_report_id(note) for note in mrn_date_filtered_inpatient_notes
+    ]
+    unique_inpatient_record_ids = set(inpatient_record_ids)
+    if len(inpatient_record_ids) != len(unique_inpatient_record_ids):
+        raise ValueError(
+            f"Of {len(inpatient_record_ids)} inpatient report IDs {len(unique_inpatient_record_ids)} are unique"
+        )
+    outpatient_record_ids = [
+        get_report_id(note) for note in mrn_date_filtered_outpatient_notes
+    ]
+    unique_outpatient_record_ids = set(outpatient_record_ids)
+    if len(outpatient_record_ids) != len(unique_outpatient_record_ids):
+        raise ValueError(
+            f"Of {len(outpatient_record_ids)} outpatient report IDs {len(unique_outpatient_record_ids)} are unique"
+        )
+    if len(unique_outpatient_record_ids & unique_inpatient_record_ids) > 0:
+        raise ValueError(
+            f"Outpatient and inpatient have {len(unique_outpatient_record_ids & unique_inpatient_record_ids)} report IDs in common"
+        )
+    target_report_ids = random.sample(
+        list(unique_outpatient_record_ids | unique_inpatient_record_ids),
+        k=sample_size,
+    )
+    assert all_unique(target_report_ids) and len(target_report_ids) == sample_size, (
+        f"{len(target_report_ids)} {len(unique_outpatient_record_ids | unique_inpatient_record_ids)}"
+    )
+
+    target_report_ids = set(target_report_ids)
+    print(f"Total inpatient: {len(target_report_ids & unique_inpatient_record_ids)}")
+    print(f"Total outpatient: {len(target_report_ids & unique_outpatient_record_ids)}")
+    print(
+        f"Total: {len(target_report_ids & unique_outpatient_record_ids) + len(target_report_ids & unique_inpatient_record_ids)}"
+    )
+
     def to_jsonl(note_json: note_dict) -> str:
         return json.dumps(note_json) + "\n"
 
-    with open(
-        os.path.join(output_dir, "inpatient", "filtered_inpatient.jsonl"), mode="w"
-    ) as f:
-        f.writelines(map(to_jsonl, mrn_date_filtered_inpatient_notes))
+    def valid_note(note: note_dict) -> bool:
+        return get_report_id(note) in target_report_ids
 
-    with open(
-        os.path.join(output_dir, "outpatient", "filtered_outpatient.jsonl"), mode="w"
-    ) as f:
-        f.writelines(map(to_jsonl, mrn_date_filtered_outpatient_notes))
+    with open(os.path.join(output_dir, "all.json"), mode="w") as f:
+        f.writelines(
+            map(
+                to_jsonl,
+                map(
+                    correct_note_text,
+                    filter(
+                        valid_note,
+                        chain(
+                            mrn_date_filtered_inpatient_notes,
+                            mrn_date_filtered_outpatient_notes,
+                        ),
+                    ),
+                ),
+            )
+        )
 
 
 def main():
@@ -642,6 +698,7 @@ def main():
         args.stratify_end,
         args.output_dir,
         args.filter_by_word_count,
+        args.sample_size,
     )
 
 
