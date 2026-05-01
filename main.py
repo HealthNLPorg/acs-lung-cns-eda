@@ -413,7 +413,7 @@ def convert_and_filter_valid_dates(
 def sample_valid_dates(
     casenum_toxdesc_with_valid_dates_subframe: pl.DataFrame,
     sample_size: int = 1,
-    sample_seed: int | None = SAMPLE_SEED,
+    sample_seed: int = SAMPLE_SEED,
 ) -> pl.DataFrame | None:
     if len(casenum_toxdesc_with_valid_dates_subframe) < sample_size:
         return None
@@ -718,6 +718,5 @@ def main():
     )
 
 
-# RPT_TEXT
 if __name__ == "__main__":
     main()
