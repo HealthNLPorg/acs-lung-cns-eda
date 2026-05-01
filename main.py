@@ -1,12 +1,15 @@
-import random
 from itertools import chain
+import random
 import polars as pl
+from collections import defaultdict, Counter
 import os
 import json
 import argparse
-from enum import Enum
+import string
+from tabulate import tabulate
+from more_itertools import one, all_unique
 from functools import cache
-from collections.abc import Mapping, Sequence, Collection
+from collections.abc import Mapping, Sequence, Collection, Iterable
 from operator import itemgetter, is_not_none
 from math import floor
 import datetime
@@ -42,11 +45,23 @@ parser.add_argument(
     help="Out patient JSON",
 )
 parser.add_argument(
+    "--inpatient_provider_departments_path",
+    type=str,
+    help="In patient PROVIDER_DEPARTMENTS",
+)
+
+parser.add_argument(
+    "--outpatient_provider_departments_path",
+    type=str,
+    help="Out patient PROVIDER_DEPARTMENTS",
+)
+parser.add_argument(
     "--output_dir",
     type=str,
     default=".",
     help="Directory for outputting table",
 )
+
 parser.add_argument(
     "--filter_to_single_date",
     action="store_true",
@@ -62,6 +77,13 @@ parser.add_argument(
     action="store_true",
     help="Starting at the beginning",
 )
+parser.add_argument(
+    "--sample_size",
+    type=int,
+    default=500,
+    help="Out patient PROVIDER_DEPARTMENTS",
+)
+parser.add_argument("--filter_by_word_count", action="store_true")
 logger = logging.getLogger(__name__)
 
 logging.basicConfig(
@@ -69,17 +91,32 @@ logging.basicConfig(
     datefmt="%m/%d/%Y %H:%M:%S",
     level=logging.INFO,
 )
-note_dict = dict[str, str | int]
+note_dict = Mapping[str, str | int]
 
 
-SIX_WEEKS = datetime.timedelta(days=42)
-SAME_DAY = datetime.timedelta(days=0)
+SIX_WEEKS_AFTER = datetime.timedelta(days=42)
+TWO_WEEKS_BEFORE = datetime.timedelta(days=-14)
 
 
-class MRNSpace(Enum):
-    DFCI = "DFCI"
-    EMPI = "EMPI"
-    MGH = "MGH"
+@cache
+def relevant_unicode_category(category: str) -> bool:
+    return category != "So" and not category.startswith("C")
+
+
+@cache
+def relevant_character(char: str) -> bool:
+    return char in string.ascii_letters + string.digits + string.punctuation + " "
+
+
+def correct_note_text(note: note_dict, text_key: str = "RPT_TEXT") -> note_dict:
+    raw = note.get(text_key)
+    if not isinstance(raw, str):
+        raise ValueError(f"Missing note text for {text_key} and {note['DFCI_MRN']}")
+    cleaned = "".join(filter(relevant_character, raw))
+    if cleaned != raw:
+        logger.warning("Problematic source for note: %s", note["RPT_ID"])
+    return {k: v if k != text_key else cleaned for k, v in note.items()}
+    # return note
 
 
 def __normalize(s: str) -> str:
@@ -98,8 +135,8 @@ def parse_and_normalize_date(dt_str: str) -> datetime.date:
 def dates_within_range(
     pt_earliest: datetime.date,
     note_date: str | None,
-    upper_bound: datetime.timedelta = SIX_WEEKS,
-    lower_bound: datetime.timedelta = SAME_DAY,
+    upper_bound: datetime.timedelta = SIX_WEEKS_AFTER,
+    lower_bound: datetime.timedelta = TWO_WEEKS_BEFORE,
 ) -> bool:
     if note_date is None:
         # If we don't know then rule it out
@@ -111,12 +148,76 @@ def dates_within_range(
     )
 
 
+def table_to_provider_departments(table_path: str) -> Collection[str]:
+    df = pl.read_csv(table_path)
+    return {
+        provider_department
+        for provider_department in df.filter(pl.col("retain") == 1)
+        .select("PROVIDER_DEPARTMENT_STR")
+        .to_series()
+    }
+
+
+def print_totals(
+    note_jsons: Iterable[note_dict],
+    key: str,
+    stage: str,
+    first_n: int | None = 10,
+    out_path: str | None = None,
+) -> None:
+    totals_by_key = Counter(note_json.get(key) for note_json in note_jsons)
+    if out_path is None:
+        if first_n is None:
+            print(stage)
+            print(
+                tabulate(
+                    totals_by_key.most_common(),
+                    headers=[" ".join(key.split("_")).title(), "Total"],
+                )
+            )
+            return
+        print(stage)
+        print(
+            tabulate(
+                chain(
+                    totals_by_key.most_common()[: min(len(totals_by_key), first_n)],
+                    [("...", "...")],
+                ),
+                headers=[" ".join(key.split("_")).title(), "Total"],
+            )
+        )
+    else:
+        pl.DataFrame(
+            schema=[(key, pl.String), ("Total", pl.Int64)],
+            data=totals_by_key.most_common(),
+        ).write_csv(out_path)
+
+
+def word_count_filter(
+    note_jsons: Collection[note_dict],
+    source: str,
+    minimum_total_words: int = 500,
+) -> Sequence[note_dict]:
+    def has_minimum_total_words(
+        note_json: note_dict, mininum_total_words: int = minimum_total_words
+    ) -> bool:
+        return len(str(note_json.get("RPT_TEXT", "")).split()) >= mininum_total_words
+
+    filtered = [
+        note_json for note_json in note_jsons if has_minimum_total_words(note_json)
+    ]
+    logger.info(
+        f"Total {source} notes before minimum of {minimum_total_words} words filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+    )
+    return filtered
+
+
 def mkdir(dir_name: str) -> None:
     _dir_name = pathlib.Path(dir_name)
     _dir_name.mkdir(parents=True, exist_ok=True)
 
 
-def save_jsonl(output_dir: str, fn: str, note_json_list: list[dict]) -> None:
+def save_jsonl(output_dir: str, fn: str, note_json_list: Iterable[dict]) -> None:
     mkdir(output_dir)
 
     # Honestly can't believe Python doesn't implement this part
@@ -128,20 +229,22 @@ def save_jsonl(output_dir: str, fn: str, note_json_list: list[dict]) -> None:
 
 
 def has_valid_mrn_and_date(
-    mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
+    mrn_to_earliest_dates: Mapping[int, Collection[tuple[datetime.date, str]]],
     note_json: note_dict,
 ) -> bool:
     mrn_key = "DFCI_MRN"
     mrn = int(note_json[mrn_key])
-    if mrn not in mrn_to_earliest_date:
+    if mrn not in mrn_to_earliest_dates:
         # invalid MRN
         return False
-    pt_earliest, _ = mrn_to_earliest_date[mrn]
+    note_date = note_json.get("EVENT_DATE")
     # Everything in the table has an earliest date
     # so don't need to worry about misses
-    note_date = note_json.get("EVENT_DATE")
     # Absent dates handled here
-    return dates_within_range(pt_earliest, note_date)
+    return any(
+        dates_within_range(pt_earliest, note_date)
+        for pt_earliest, _ in mrn_to_earliest_dates[mrn]
+    )
 
 
 def raw_json_parse(json_path: str) -> list[note_dict]:
@@ -149,34 +252,31 @@ def raw_json_parse(json_path: str) -> list[note_dict]:
         return json.load(f)["response"]["docs"]
 
 
-# etg@DIMJ0JW5Y9T3G cns_eda_workspace % rg "PROVIDER_TYPE\"" Inpatient\ Progress.json | sort | uniq -c
-#   12         "PROVIDER_TYPE":"Anesthesiologist",
-#   10         "PROVIDER_TYPE":"Dentist",
-#    2         "PROVIDER_TYPE":"Fellow",
-#    1         "PROVIDER_TYPE":"Licensed Nurse",
-#   27         "PROVIDER_TYPE":"Nurse Practitioner",
-#    1         "PROVIDER_TYPE":"Occupational Therapist",
-#    3         "PROVIDER_TYPE":"Physical Therapist",
-#  137         "PROVIDER_TYPE":"Physician Assistant",
-# 2501         "PROVIDER_TYPE":"Physician",
-#   30         "PROVIDER_TYPE":"Registered Nurse",
-#  588         "PROVIDER_TYPE":"Resource",
-#    1         "PROVIDER_TYPE":"Speech-Language Pathologist",
-def filter_inpatient_provider_types(
+def filter_provider_departments(
     note_jsons: Collection[note_dict],
+    relevant_provider_departments: Collection[str],
+    source: str,
+) -> Sequence[note_dict]:
+    filtered = [
+        note_json
+        for note_json in note_jsons
+        if note_json.get("PROVIDER_DEPARTMENT_STR") in relevant_provider_departments
+    ]
+    logger.info(
+        f"Total {source} notes before provider departments filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+    )
+    return filtered
+
+
+def filter_provider_types(
+    note_jsons: Collection[note_dict], source: str
 ) -> Sequence[note_dict]:
     inpatient_provider_types = {
         "Physician",
         "Physician Assistant",
         "Nurse Practitioner",
         "Fellow",
-        # These were from Danielle but
-        # rg "PROVIDER_TYPE\"" Inpatient\ Progress.json | sort | uniq -c
-        # didn't turn any of these up
-        # if we want to use any other types they're listed above
         "Resident",
-        "Intern",
-        "Attending",
     }
     filtered = [
         note_json
@@ -184,83 +284,30 @@ def filter_inpatient_provider_types(
         if note_json.get("PROVIDER_TYPE") in inpatient_provider_types
     ]
     logger.info(
-        f"Total in patient notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
-    )
-    return filtered
-
-
-# etg@DIMJ0JW5Y9T3G cns_eda_workspace % rg "PROVIDER_TYPE\"" Outpatient\ Progress.json | sort | uniq -c
-#  105         "PROVIDER_TYPE":"Acupuncturist",
-#    7         "PROVIDER_TYPE":"Ancillary",
-#   91         "PROVIDER_TYPE":"Anesthesiologist",
-#   14         "PROVIDER_TYPE":"Audiologist",
-#    3         "PROVIDER_TYPE":"Case Manager",
-#    4         "PROVIDER_TYPE":"Community Health Worker",
-#   49         "PROVIDER_TYPE":"Coordinator",
-#    6         "PROVIDER_TYPE":"Counselor",
-#   14         "PROVIDER_TYPE":"Dentist",
-#    1         "PROVIDER_TYPE":"Embryologist",
-#   20         "PROVIDER_TYPE":"Fellow",
-#  279         "PROVIDER_TYPE":"Generic Provider",
-#   24         "PROVIDER_TYPE":"Genetic Counselor",
-#  147         "PROVIDER_TYPE":"Licensed Dietitian/Nutritionist",
-#    9         "PROVIDER_TYPE":"Licensed Nurse",
-#   10         "PROVIDER_TYPE":"Medical Assistant",
-# 2882         "PROVIDER_TYPE":"Nurse Practitioner",
-#  104         "PROVIDER_TYPE":"Occupational Therapist",
-#    2         "PROVIDER_TYPE":"Patient Care/Nursing Assistant",
-#   18         "PROVIDER_TYPE":"Pharmacist",
-#    2         "PROVIDER_TYPE":"Physical Therapist Assistant",
-#  317         "PROVIDER_TYPE":"Physical Therapist",
-#  825         "PROVIDER_TYPE":"Physician Assistant",
-# 8184         "PROVIDER_TYPE":"Physician",
-#   13         "PROVIDER_TYPE":"Podiatrist",
-#   14         "PROVIDER_TYPE":"Psychologist",
-#   63         "PROVIDER_TYPE":"Registered Dietitian",
-# 5762         "PROVIDER_TYPE":"Registered Nurse",
-#    3         "PROVIDER_TYPE":"Resident",
-#  161         "PROVIDER_TYPE":"Resource",
-#    4         "PROVIDER_TYPE":"Respiratory Therapist",
-#  952         "PROVIDER_TYPE":"Social Worker",
-#  105         "PROVIDER_TYPE":"Speech-Language Pathologist",
-#    2         "PROVIDER_TYPE":"Spiritual Care Student",
-#   20         "PROVIDER_TYPE":"Spiritual Care",
-#    4         "PROVIDER_TYPE":"Technologist",
-#   21         "PROVIDER_TYPE":"Therapist",
-def filter_outpatient_provider_types(
-    note_jsons: Collection[note_dict],
-) -> Sequence[note_dict]:
-    # Same as inpatient except for "Attending" and "Intern"
-    # unlike with inpatient everything is accounted for
-    outpatient_provider_types = {
-        "Physician",
-        "Physician Assistant",
-        "Nurse Practitioner",
-        "Fellow",
-        "Resident",
-    }
-    filtered = [
-        note_json
-        for note_json in note_jsons
-        if note_json.get("PROVIDER_TYPE") in outpatient_provider_types
-    ]
-
-    logger.info(
-        f"Total out patient notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
+        f"Total {source} notes before provider types filtration: {len(note_jsons):,} - after: {len(filtered):,}"
     )
     return filtered
 
 
 def get_radiation_relation_label(
     note_json: note_dict,
-    mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
+    mrn_to_earliest_dates: Mapping[int, Collection[tuple[datetime.date, str]]],
 ) -> str:
     # since has.. is the filter predicate we don't
     # have to worry if the MRN isn't in the table
     mrn_key = "DFCI_MRN"
     mrn = int(note_json[mrn_key])
-    _, radiation_relation = mrn_to_earliest_date[mrn]
-    return radiation_relation
+    try:
+        _, radiation_relation = one(
+            mrn_to_earliest_dates[mrn], too_long=ValueError, too_short=IndexError
+        )
+        return radiation_relation
+    except IndexError:
+        raise ValueError(f"Missing date and radiation relation for {mrn}")
+    except ValueError:
+        raise ValueError(
+            f"{len(mrn_to_earliest_dates[mrn])} date/radiation relation pairs for {mrn}, need to filter to single date before this point"
+        )
 
 
 def collection_relation_category_sampling(
@@ -280,7 +327,7 @@ def collection_relation_category_sampling(
     return list(
         chain(
             others,
-            random.choices(
+            random.sample(
                 [
                     note
                     for note, radiation_relation in notes
@@ -303,19 +350,19 @@ def stratification(
 def filter_valid_mrn_and_date_notes(
     note_type: str,
     note_dicts: Collection[note_dict],
-    mrn_to_earliest_date: Mapping[int, tuple[datetime.date, str]],
+    mrn_to_earliest_dates: Mapping[int, Collection[tuple[datetime.date, str]]],
     stratify_end: bool,
 ) -> Sequence[note_dict]:
     filtered = [
         (
             note_json,
             get_radiation_relation_label(
-                note_json=note_json, mrn_to_earliest_date=mrn_to_earliest_date
+                note_json=note_json, mrn_to_earliest_dates=mrn_to_earliest_dates
             ),
         )
         for note_json in note_dicts
         if has_valid_mrn_and_date(
-            mrn_to_earliest_date=mrn_to_earliest_date, note_json=note_json
+            mrn_to_earliest_dates=mrn_to_earliest_dates, note_json=note_json
         )
     ]
     result = stratification(notes=filtered, stratify_end=stratify_end)
@@ -395,9 +442,9 @@ def relation_category_sampling(
     )
 
 
-def build_casenum_filtered_frame(
-    valid_casenums: Collection[int],
+def build_mrn_filtered_frame(
     casenum_ade_date_table: str,
+    casenum_to_mrn: Mapping[int, int],
 ) -> pl.DataFrame:
     # First try grouping by toxdesc, selecting by date, then doing fractional sampling
     # by d_attn
@@ -406,14 +453,12 @@ def build_casenum_filtered_frame(
     )
     print(f"Before casenum filtering - total instances {len(casenum_ade_date_frame)}")
     print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
-    casenum_ade_date_frame = casenum_ade_date_frame.filter(
-        pl.col("casenum").is_in(valid_casenums)
-    )
-    print(
-        f"After valid DFCI MRN filtering - total instances {len(casenum_ade_date_frame)}"
-    )
-    print(casenum_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
-    return casenum_ade_date_frame
+    mrn_ade_date_frame = casenum_ade_date_frame.filter(
+        pl.col("casenum").is_in(casenum_to_mrn.keys())
+    ).with_columns(pl.col("casenum").replace_strict(casenum_to_mrn).alias("MRN"))
+    print(f"After valid DFCI MRN filtering - total instances {len(mrn_ade_date_frame)}")
+    print(mrn_ade_date_frame["D_ATTN"].value_counts(normalize=True, sort=True))
+    return mrn_ade_date_frame
 
 
 def build_date_filtered_frame(frame: pl.DataFrame) -> pl.DataFrame:
@@ -435,7 +480,7 @@ def build_date_filtered_frame(frame: pl.DataFrame) -> pl.DataFrame:
         )
     )
 
-    print(f"After TOXDESC etc filtering - total instances {len(date_filtered_frame)}")
+    print(f"After date filtering - total instances {len(date_filtered_frame)}")
     print(date_filtered_frame["D_ATTN"].value_counts(normalize=True, sort=True))
     return date_filtered_frame
 
@@ -452,12 +497,13 @@ def build_relation_filtered_frame(
     return relation_filtered_frame
 
 
-def build_mrn_to_event_date_map(
+def build_mrn_to_event_dates_map(
     casenum_ade_date_table: str,
     casenum_dfci_mrn_table: str,
     filter_to_single_date: bool,
     stratify_relations: bool,
-) -> Mapping[int, tuple[datetime.date, str]]:
+) -> Mapping[int, Collection[tuple[datetime.date, str]]]:
+    result = defaultdict(set)
     casenum_dfci_mrn_df = pl.read_csv(casenum_dfci_mrn_table)
     casenum_to_dfci_mrn_map = {
         casenum: DFCI_MRN
@@ -466,28 +512,34 @@ def build_mrn_to_event_date_map(
         )
     }
 
-    def get_mrn(case_number: int) -> int:
-        mrn = casenum_to_dfci_mrn_map.get(case_number)
-        if mrn is None:
-            raise ValueError(f"No MRN for {case_number} even after filtering")
-        return mrn
-
-    casenum_filtered_frame = build_casenum_filtered_frame(
-        casenum_to_dfci_mrn_map.keys(), casenum_ade_date_table
+    mrn_filtered_frame = build_mrn_filtered_frame(
+        casenum_ade_date_table=casenum_ade_date_table,
+        casenum_to_mrn=casenum_to_dfci_mrn_map,
     )
-    filtered_frame = convert_and_filter_valid_dates(casenum_filtered_frame)
+    filtered_frame = convert_and_filter_valid_dates(mrn_filtered_frame)
+
     if filter_to_single_date:
         filtered_frame = build_date_filtered_frame(filtered_frame)
     if stratify_relations:
         filtered_frame = build_relation_filtered_frame(filtered_frame)
-    return {
-        get_mrn(case_number): (normalized_date, radiation_relation)
-        for case_number, normalized_date, radiation_relation in zip(
-            filtered_frame["casenum"],
-            filtered_frame["NORMALIZED_DATE"],
-            filtered_frame["D_ATTN"],
-        )
-    }
+    for mrn, normalized_date, radiation_relation in zip(
+        filtered_frame["MRN"],
+        filtered_frame["NORMALIZED_DATE"],
+        filtered_frame["D_ATTN"],
+    ):
+        if mrn not in result:
+            result[mrn].add((normalized_date, radiation_relation))
+    # if stratify_relations and filter_to_single_date:
+    #     exit_early = False
+    #     for k, v in result.items():
+    #         if len(v) > 1:
+    #             logger.error(f"WHATS HAPPENING {k} {v}")
+    #             exit_early = True
+    #     if exit_early:
+    #         print(filter_to_single_date)
+    #         print(stratify_relations)
+    #         exit(1)
+    return result
 
 
 def collect_notes_and_write_metrics(
@@ -495,14 +547,23 @@ def collect_notes_and_write_metrics(
     casenum_dfci_mrn_table: str,
     inpatient_json_path: str,
     outpatient_json_path: str,
+    inpatient_provider_departments_path: str,
+    outpatient_provider_departments_path: str,
     filter_to_single_date: bool,
     stratify_beginning: bool,
     stratify_end: bool,
     output_dir: str,
+    filter_by_word_count: bool,
+    sample_size: int,
 ) -> None:
-    if stratify_beginning and stratify_end:
-        raise ValueError("You can't stratify at both the beginning and the end")
-    mrn_to_selected_date = build_mrn_to_event_date_map(
+    inpatient_provider_departments = table_to_provider_departments(
+        inpatient_provider_departments_path
+    )
+    outpatient_provider_departments = table_to_provider_departments(
+        outpatient_provider_departments_path
+    )
+
+    mrn_to_earliest_dates = build_mrn_to_event_dates_map(
         casenum_ade_date_table,
         casenum_dfci_mrn_table,
         filter_to_single_date=filter_to_single_date,
@@ -511,31 +572,132 @@ def collect_notes_and_write_metrics(
 
     all_inpatient_notes = raw_json_parse(inpatient_json_path)
     all_outpatient_notes = raw_json_parse(outpatient_json_path)
-    provider_type_filtered_inpatient_notes = filter_inpatient_provider_types(
-        all_inpatient_notes
+    print_totals(
+        all_outpatient_notes, key="PROVIDER_DEPARTMENT_STR", stage="All outpatient"
     )
-    provider_type_filtered_outpatient_notes = filter_outpatient_provider_types(
-        all_outpatient_notes
+    provider_type_filtered_inpatient_notes = filter_provider_types(
+        all_inpatient_notes, source="in patient"
     )
+    provider_type_filtered_outpatient_notes = filter_provider_types(
+        all_outpatient_notes, source="out patient"
+    )
+
+    provider_department_filtered_inpatient_notes = filter_provider_departments(
+        provider_type_filtered_inpatient_notes,
+        source="in patient",
+        relevant_provider_departments=inpatient_provider_departments,
+    )
+    provider_department_filtered_outpatient_notes = filter_provider_departments(
+        provider_type_filtered_outpatient_notes,
+        source="out patient",
+        relevant_provider_departments=outpatient_provider_departments,
+    )
+
+    if filter_by_word_count:
+        provider_department_filtered_inpatient_notes = word_count_filter(
+            provider_department_filtered_inpatient_notes, source="in patient"
+        )
+
+        provider_department_filtered_outpatient_notes = word_count_filter(
+            provider_department_filtered_outpatient_notes, source="out patient"
+        )
+
     mrn_date_filtered_inpatient_notes = filter_valid_mrn_and_date_notes(
         note_type="inpatient",
-        note_dicts=provider_type_filtered_inpatient_notes,
-        mrn_to_earliest_date=mrn_to_selected_date,
+        note_dicts=provider_department_filtered_inpatient_notes,
+        mrn_to_earliest_dates=mrn_to_earliest_dates,
         stratify_end=stratify_end,
     )
     mrn_date_filtered_outpatient_notes = filter_valid_mrn_and_date_notes(
         note_type="outpatient",
-        note_dicts=provider_type_filtered_outpatient_notes,
-        mrn_to_earliest_date=mrn_to_selected_date,
+        note_dicts=provider_department_filtered_outpatient_notes,
+        mrn_to_earliest_dates=mrn_to_earliest_dates,
         stratify_end=stratify_end,
     )
-    with open(os.path.join(output_dir, "filtered_inpatient.json"), mode="w") as f:
-        json.dump(mrn_date_filtered_inpatient_notes, f)
 
-    with open(
-        os.path.join(output_dir, "mrn_date_filtered_outpatient.json"), mode="w"
-    ) as f:
-        json.dump(mrn_date_filtered_outpatient_notes, f)
+    def get_report_id(note: note_dict) -> int:
+        report_id = note.get("RPT_ID")
+        if report_id is None:
+            raise ValueError(f"Note with MRN {note['DFCI_MRN']} missing report ID")
+        return int(report_id)
+
+    inpatient_record_ids = [
+        get_report_id(note) for note in mrn_date_filtered_inpatient_notes
+    ]
+    unique_inpatient_record_ids = set(inpatient_record_ids)
+    if len(inpatient_record_ids) != len(unique_inpatient_record_ids):
+        raise ValueError(
+            f"Of {len(inpatient_record_ids)} inpatient report IDs {len(unique_inpatient_record_ids)} are unique"
+        )
+    outpatient_record_ids = [
+        get_report_id(note) for note in mrn_date_filtered_outpatient_notes
+    ]
+    unique_outpatient_record_ids = set(outpatient_record_ids)
+    if len(outpatient_record_ids) != len(unique_outpatient_record_ids):
+        raise ValueError(
+            f"Of {len(outpatient_record_ids)} outpatient report IDs {len(unique_outpatient_record_ids)} are unique"
+        )
+    if len(unique_outpatient_record_ids & unique_inpatient_record_ids) > 0:
+        raise ValueError(
+            f"Outpatient and inpatient have {len(unique_outpatient_record_ids & unique_inpatient_record_ids)} report IDs in common"
+        )
+    target_report_ids = random.sample(
+        list(unique_outpatient_record_ids | unique_inpatient_record_ids),
+        k=sample_size,
+    )
+    assert all_unique(target_report_ids) and len(target_report_ids) == sample_size, (
+        f"{len(target_report_ids)} {len(unique_outpatient_record_ids | unique_inpatient_record_ids)}"
+    )
+
+    target_report_ids = set(target_report_ids)
+    print(f"Total inpatient: {len(target_report_ids & unique_inpatient_record_ids)}")
+    print(f"Total outpatient: {len(target_report_ids & unique_outpatient_record_ids)}")
+    print(
+        f"Total: {len(target_report_ids & unique_outpatient_record_ids) + len(target_report_ids & unique_inpatient_record_ids)}"
+    )
+
+    def to_jsonl(note_json: note_dict) -> str:
+        return json.dumps(note_json) + "\n"
+
+    def valid_note(note: note_dict) -> bool:
+        return get_report_id(note) in target_report_ids
+
+    corrected_notes = [
+        correct_note_text(note)
+        for note in chain(
+            mrn_date_filtered_inpatient_notes,
+            mrn_date_filtered_outpatient_notes,
+        )
+        if valid_note(note)
+    ]
+    with open(os.path.join(output_dir, "all.json"), mode="w", encoding="utf-8") as f:
+        f.writelines(
+            map(
+                to_jsonl,
+                corrected_notes,
+            )
+        )
+    ctakes_ready = os.path.join(
+        output_dir,
+        "ctakes_ready",
+    )
+    for fn in os.listdir(ctakes_ready):
+        os.remove(os.path.join(ctakes_ready, fn))
+    for corrected_note in corrected_notes:
+        with open(
+            os.path.join(
+                ctakes_ready,
+                f"{get_report_id(corrected_note)}.txt",
+            ),
+            mode="w",
+            encoding="utf-8",
+        ) as f:
+            corrected_text = corrected_note.get("RPT_TEXT")
+            if corrected_text is None or not isinstance(corrected_text, str):
+                raise ValueError(
+                    f"Missing corrected text for {get_report_id(corrected_note)}"
+                )
+            f.write(corrected_text)
 
 
 def main():
@@ -545,10 +707,14 @@ def main():
         args.casenum_dfci_mrn_table,
         args.inpatient_json_path,
         args.outpatient_json_path,
+        args.inpatient_provider_departments_path,
+        args.outpatient_provider_departments_path,
         args.filter_to_single_date,
         args.stratify_beginning,
         args.stratify_end,
         args.output_dir,
+        args.filter_by_word_count,
+        args.sample_size,
     )
 
 

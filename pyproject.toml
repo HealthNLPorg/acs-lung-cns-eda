@@ -4,4 +4,4 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["polars", "ruff", "python-dateutil", "ty", "more_itertools", "fastexcel", "ipython"]
+dependencies = ["polars", "ruff", "python-dateutil", "ty", "more_itertools", "fastexcel", "ipython", "tabulate"]
