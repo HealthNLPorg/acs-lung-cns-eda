@@ -1,4 +1,9 @@
 # acs-lung-cns-eda
+
+EDA and data selection tools for the central nervous system adverse event cohort of the ACS-CTAE project.
+
+## Examples
+
 Example command
 ```
 uv run main.py \

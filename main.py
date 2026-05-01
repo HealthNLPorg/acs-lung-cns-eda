@@ -6,7 +6,6 @@ import os
 import json
 import argparse
 import string
-import unicodedata
 from tabulate import tabulate
 from more_itertools import one, all_unique
 from functools import cache
@@ -106,21 +105,18 @@ def relevant_unicode_category(category: str) -> bool:
 
 @cache
 def relevant_character(char: str) -> bool:
-    if char in string.printable:
-        return True
-    category = unicodedata.category(char)
-    return relevant_unicode_category(category)
+    return char in string.ascii_letters + string.digits + string.punctuation + " "
 
 
 def correct_note_text(note: note_dict, text_key: str = "RPT_TEXT") -> note_dict:
     raw = note.get(text_key)
-    if raw is None or not isinstance(raw, str):
+    if not isinstance(raw, str):
         raise ValueError(f"Missing note text for {text_key} and {note['DFCI_MRN']}")
     cleaned = "".join(filter(relevant_character, raw))
     if cleaned != raw:
-        # logger.warning("Problematic source for note: %s", note["DFCI_MRN"])
-        return {k: v if k != text_key else cleaned for k, v in note.items()}
-    return note
+        logger.warning("Problematic source for note: %s", note["RPT_ID"])
+    return {k: v if k != text_key else cleaned for k, v in note.items()}
+    # return note
 
 
 def __normalize(s: str) -> str:
@@ -681,11 +677,16 @@ def collect_notes_and_write_metrics(
                 corrected_notes,
             )
         )
+    ctakes_ready = os.path.join(
+        output_dir,
+        "ctakes_ready",
+    )
+    for fn in os.listdir(ctakes_ready):
+        os.remove(os.path.join(ctakes_ready, fn))
     for corrected_note in corrected_notes:
         with open(
             os.path.join(
-                output_dir,
-                "ctakes_ready",
+                ctakes_ready,
                 f"{get_report_id(corrected_note)}.txt",
             ),
             mode="w",
